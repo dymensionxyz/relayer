@@ -21,9 +21,11 @@ import (
 	commitmenttypes "github.com/cosmos/ibc-go/v3/modules/core/23-commitment/types"
 	host "github.com/cosmos/ibc-go/v3/modules/core/24-host"
 	ibcexported "github.com/cosmos/ibc-go/v3/modules/core/exported"
+	"github.com/cosmos/ibc-go/v3/modules/light-clients/01-dymint/types"
 	tmclient "github.com/cosmos/ibc-go/v3/modules/light-clients/07-tendermint/types"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	"github.com/tendermint/tendermint/light"
+	types2 "github.com/tendermint/tendermint/proto/tendermint/types"
 	tmtypes "github.com/tendermint/tendermint/types"
 	"go.uber.org/zap"
 )
@@ -281,17 +283,17 @@ func (cc *CosmosProvider) buildMessages(ctx context.Context, msgs []provider.Rel
 
 // CreateClient creates an sdk.Msg to update the client on src with consensus state from dst
 func (cc *CosmosProvider) CreateClient(clientState ibcexported.ClientState, dstHeader ibcexported.Header, signer string) (provider.RelayerMessage, error) {
-	tmHeader, ok := dstHeader.(*tmclient.Header)
-	if !ok {
-		return nil, fmt.Errorf("got data of type %T but wanted tmclient.Header", dstHeader)
-	}
-
 	anyClientState, err := clienttypes.PackClientState(clientState)
 	if err != nil {
 		return nil, err
 	}
 
-	anyConsensusState, err := clienttypes.PackConsensusState(tmHeader.ConsensusState())
+	consensusState, err := getConsensusState(dstHeader)
+	if err != nil {
+		return nil, err
+	}
+
+	anyConsensusState, err := clienttypes.PackConsensusState(consensusState)
 	if err != nil {
 		return nil, err
 	}
@@ -1534,12 +1536,7 @@ func (cc *CosmosProvider) MsgUpdateClientHeader(latestHeader provider.IBCHeader,
 		return nil, fmt.Errorf("error converting validator set to proto object: %w", err)
 	}
 
-	return &tmclient.Header{
-		SignedHeader:      signedHeaderProto,
-		ValidatorSet:      validatorSetProto,
-		TrustedValidators: trustedValidatorsProto,
-		TrustedHeight:     trustedHeight,
-	}, nil
+	return NewClientHeader(cc.PCfg.ClientType, signedHeaderProto, validatorSetProto, trustedValidatorsProto, trustedHeight)
 }
 
 // RelayPacketFromSequence relays a packet with a given seq on src and returns recvPacket msgs, timeoutPacketmsgs and error
@@ -1892,10 +1889,19 @@ func (cc *CosmosProvider) GetLightSignedHeaderAtHeight(ctx context.Context, h in
 		return nil, err
 	}
 
-	return &tmclient.Header{
-		SignedHeader: lightBlock.SignedHeader.ToProto(),
-		ValidatorSet: protoVal,
-	}, nil
+	if cc.PCfg.ClientType == ibcexported.Dymint {
+		return &types.Header{
+			SignedHeader: lightBlock.SignedHeader.ToProto(),
+			ValidatorSet: protoVal,
+		}, nil
+	}
+	if cc.PCfg.ClientType == ibcexported.Tendermint {
+		return &tmclient.Header{
+			SignedHeader: lightBlock.SignedHeader.ToProto(),
+			ValidatorSet: protoVal,
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported client type %s", cc.PCfg.ClientType)
 }
 
 // InjectTrustedFields injects the necessary trusted fields for a header to update a light
@@ -1905,21 +1911,20 @@ func (cc *CosmosProvider) GetLightSignedHeaderAtHeight(ctx context.Context, h in
 // TrustedValidators is the validator set of srcChain at the TrustedHeight
 // InjectTrustedFields returns a copy of the header with TrustedFields modified
 func (cc *CosmosProvider) InjectTrustedFields(ctx context.Context, header ibcexported.Header, dst provider.ChainProvider, dstClientId string) (ibcexported.Header, error) {
-	// make copy of header stored in mop
-	h, ok := header.(*tmclient.Header)
-	if !ok {
-		return nil, fmt.Errorf("trying to inject fields into non-tendermint headers")
+	trustedHeight, err := getTrustedHeight(header)
+	if err != nil {
+		return nil, err
 	}
 
 	// retrieve dst client from src chain
 	// this is the client that will be updated
-	cs, err := dst.QueryClientState(ctx, int64(h.TrustedHeight.RevisionHeight), dstClientId)
+	cs, err := dst.QueryClientState(ctx, int64(trustedHeight.RevisionHeight), dstClientId)
 	if err != nil {
 		return nil, err
 	}
 
 	// inject TrustedHeight as latest height stored on dst client
-	h.TrustedHeight = cs.GetLatestHeight().(clienttypes.Height)
+	latestTrustedHeight := cs.GetLatestHeight().(clienttypes.Height)
 
 	// NOTE: We need to get validators from the source chain at height: trustedHeight+1
 	// since the last trusted validators for a header at height h is the NextValidators
@@ -1927,30 +1932,36 @@ func (cc *CosmosProvider) InjectTrustedFields(ctx context.Context, header ibcexp
 
 	// TODO: this is likely a source of off by 1 errors but may be impossible to change? Maybe this is the
 	// place where we need to fix the upstream query proof issue?
-	var trustedHeader *tmclient.Header
+	var trustedHeader ibcexported.Header
 	if err := retry.Do(func() error {
-		tmpHeader, err := cc.GetLightSignedHeaderAtHeight(ctx, int64(h.TrustedHeight.RevisionHeight+1))
+		trustedHeader, err = cc.GetLightSignedHeaderAtHeight(ctx, int64(latestTrustedHeight.RevisionHeight+1))
 		if err != nil {
 			return err
 		}
-
-		th, ok := tmpHeader.(*tmclient.Header)
-		if !ok {
-			err = fmt.Errorf("non-tm client header")
-		}
-
-		trustedHeader = th
 		return err
 	}, retry.Context(ctx), rtyAtt, rtyDel, rtyErr); err != nil {
 		return nil, fmt.Errorf(
 			"failed to get trusted header, please ensure header at the height %d has not been pruned by the connected node: %w",
-			h.TrustedHeight.RevisionHeight, err,
+			latestTrustedHeight.RevisionHeight, err,
 		)
 	}
 
-	// inject TrustedValidators into header
-	h.TrustedValidators = trustedHeader.ValidatorSet
-	return h, nil
+	signedHeader, err := getSignedHeader(header)
+	if err != nil {
+		return nil, err
+	}
+
+	validatorSet, err := getValidatorSet(header)
+	if err != nil {
+		return nil, err
+	}
+
+	trustedValidators, err := getValidatorSet(trustedHeader)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewClientHeader(header.ClientType(), signedHeader, validatorSet, trustedValidators, latestTrustedHeight)
 }
 
 // queryTMClientState retrieves the latest consensus state for a client in state at a given height
@@ -1962,6 +1973,147 @@ func (cc *CosmosProvider) queryTMClientState(ctx context.Context, srch int64, sr
 	}
 
 	return castClientStateToTMType(clientStateRes.ClientState)
+}
+
+// NewClientState Create the ClientState we want on 'c' tracking 'dst'
+func (cc *CosmosProvider) NewClientState(
+	dstUpdateHeader ibcexported.Header,
+	dstTrustingPeriod, dstUbdPeriod time.Duration,
+	allowUpdateAfterExpiry, allowUpdateAfterMisbehaviour bool,
+) (ibcexported.ClientState, error) {
+	if dstUpdateHeader.ClientType() == ibcexported.Dymint {
+		return &types.ClientState{
+			ChainId:                      dstUpdateHeader.GetChainID(),
+			TrustLevel:                   types.NewFractionFromTm(light.DefaultTrustLevel),
+			TrustingPeriod:               dstTrustingPeriod,
+			UnbondingPeriod:              dstUbdPeriod,
+			MaxClockDrift:                time.Minute * 10,
+			FrozenHeight:                 clienttypes.ZeroHeight(),
+			LatestHeight:                 dstUpdateHeader.GetHeight().(clienttypes.Height),
+			ProofSpecs:                   commitmenttypes.GetSDKSpecs(),
+			UpgradePath:                  defaultUpgradePath,
+			AllowUpdateAfterExpiry:       allowUpdateAfterExpiry,
+			AllowUpdateAfterMisbehaviour: allowUpdateAfterMisbehaviour,
+		}, nil
+	}
+	if dstUpdateHeader.ClientType() == ibcexported.Tendermint {
+		return &tmclient.ClientState{
+			ChainId:                      dstUpdateHeader.GetChainID(),
+			TrustLevel:                   tmclient.NewFractionFromTm(light.DefaultTrustLevel),
+			TrustingPeriod:               dstTrustingPeriod,
+			UnbondingPeriod:              dstUbdPeriod,
+			MaxClockDrift:                time.Minute * 10,
+			FrozenHeight:                 clienttypes.ZeroHeight(),
+			LatestHeight:                 dstUpdateHeader.GetHeight().(clienttypes.Height),
+			ProofSpecs:                   commitmenttypes.GetSDKSpecs(),
+			UpgradePath:                  defaultUpgradePath,
+			AllowUpdateAfterExpiry:       allowUpdateAfterExpiry,
+			AllowUpdateAfterMisbehaviour: allowUpdateAfterMisbehaviour,
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported header client type %s", dstUpdateHeader.ClientType())
+}
+
+func NewClientHeader(
+	clientType string,
+	signedHeader *types2.SignedHeader,
+	validatorSet *types2.ValidatorSet,
+	trustedValidators *types2.ValidatorSet,
+	trustedHeight clienttypes.Height,
+) (ibcexported.Header, error) {
+	if clientType == ibcexported.Dymint {
+		return &types.Header{
+			SignedHeader:      signedHeader,
+			ValidatorSet:      validatorSet,
+			TrustedValidators: trustedValidators,
+			TrustedHeight:     trustedHeight,
+		}, nil
+	}
+	if clientType == ibcexported.Tendermint {
+		return &tmclient.Header{
+			SignedHeader:      signedHeader,
+			ValidatorSet:      validatorSet,
+			TrustedValidators: trustedValidators,
+			TrustedHeight:     trustedHeight,
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported client type %s", clientType)
+}
+
+// getTrustedHeight retrieves the trusted-height from the specified header according to its client-type
+func getTrustedHeight(header ibcexported.Header) (*clienttypes.Height, error) {
+	if header.ClientType() == ibcexported.Dymint {
+		dmHeader, ok := header.(*types.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted dmclient.Header", header)
+		}
+		return &dmHeader.TrustedHeight, nil
+	}
+	if header.ClientType() == ibcexported.Tendermint {
+		tmHeader, ok := header.(*tmclient.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted tmclient.Header", header)
+		}
+		return &tmHeader.TrustedHeight, nil
+	}
+	return nil, fmt.Errorf("unsupported header client type %s", header.ClientType())
+}
+
+// getConsensusState retrieves the consensus-state from the specified header according to its client-type
+func getConsensusState(header ibcexported.Header) (ibcexported.ConsensusState, error) {
+	if header.ClientType() == ibcexported.Dymint {
+		dmHeader, ok := header.(*types.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted dmclient.Header", header)
+		}
+		return dmHeader.ConsensusState(), nil
+	}
+	if header.ClientType() == ibcexported.Tendermint {
+		tmHeader, ok := header.(*tmclient.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted tmclient.Header", header)
+		}
+		return tmHeader.ConsensusState(), nil
+	}
+	return nil, fmt.Errorf("unsupported header client type %s", header.ClientType())
+}
+
+// getSignedHeader retrieves the signed-header from the specified header according to its client-type
+func getSignedHeader(header ibcexported.Header) (*types2.SignedHeader, error) {
+	if header.ClientType() == ibcexported.Dymint {
+		dmHeader, ok := header.(*types.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted dmclient.Header", header)
+		}
+		return dmHeader.SignedHeader, nil
+	}
+	if header.ClientType() == ibcexported.Tendermint {
+		tmHeader, ok := header.(*tmclient.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted tmclient.Header", header)
+		}
+		return tmHeader.SignedHeader, nil
+	}
+	return nil, fmt.Errorf("unsupported header client type %s", header.ClientType())
+}
+
+// getValidatorSet retrieves the validator-set from the specified header according to its client-type
+func getValidatorSet(header ibcexported.Header) (*types2.ValidatorSet, error) {
+	if header.ClientType() == ibcexported.Dymint {
+		dmHeader, ok := header.(*types.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted dmclient.Header", header)
+		}
+		return dmHeader.ValidatorSet, nil
+	}
+	if header.ClientType() == ibcexported.Tendermint {
+		tmHeader, ok := header.(*tmclient.Header)
+		if !ok {
+			return nil, fmt.Errorf("got data of type %T but wanted tmclient.Header", header)
+		}
+		return tmHeader.ValidatorSet, nil
+	}
+	return nil, fmt.Errorf("unsupported headeer client type %s", header.ClientType())
 }
 
 // castClientStateToTMType casts client state to tendermint type
@@ -1983,25 +2135,3 @@ func castClientStateToTMType(cs *codectypes.Any) (*tmclient.ClientState, error) 
 
 //DefaultUpgradePath is the default IBC upgrade path set for an on-chain light client
 var defaultUpgradePath = []string{"upgrade", "upgradedIBCState"}
-
-func (cc *CosmosProvider) NewClientState(dstUpdateHeader ibcexported.Header, dstTrustingPeriod, dstUbdPeriod time.Duration, allowUpdateAfterExpiry, allowUpdateAfterMisbehaviour bool) (ibcexported.ClientState, error) {
-	dstTmHeader, ok := dstUpdateHeader.(*tmclient.Header)
-	if !ok {
-		return nil, fmt.Errorf("got data of type %T but wanted tmclient.Header", dstUpdateHeader)
-	}
-
-	// Create the ClientState we want on 'c' tracking 'dst'
-	return &tmclient.ClientState{
-		ChainId:                      dstTmHeader.GetHeader().GetChainID(),
-		TrustLevel:                   tmclient.NewFractionFromTm(light.DefaultTrustLevel),
-		TrustingPeriod:               dstTrustingPeriod,
-		UnbondingPeriod:              dstUbdPeriod,
-		MaxClockDrift:                time.Minute * 10,
-		FrozenHeight:                 clienttypes.ZeroHeight(),
-		LatestHeight:                 dstUpdateHeader.GetHeight().(clienttypes.Height),
-		ProofSpecs:                   commitmenttypes.GetSDKSpecs(),
-		UpgradePath:                  defaultUpgradePath,
-		AllowUpdateAfterExpiry:       allowUpdateAfterExpiry,
-		AllowUpdateAfterMisbehaviour: allowUpdateAfterMisbehaviour,
-	}, nil
-}

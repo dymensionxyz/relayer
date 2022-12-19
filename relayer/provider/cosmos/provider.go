@@ -35,6 +35,7 @@ type CosmosProviderConfig struct {
 	Timeout        string  `json:"timeout" yaml:"timeout"`
 	OutputFormat   string  `json:"output-format" yaml:"output-format"`
 	SignModeStr    string  `json:"sign-mode" yaml:"sign-mode"`
+	ClientType     string  `json:"client-type" yaml:"client-type"`
 }
 
 func (pc CosmosProviderConfig) Validate() error {

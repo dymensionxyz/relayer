@@ -1536,7 +1536,7 @@ func (cc *CosmosProvider) MsgUpdateClientHeader(latestHeader provider.IBCHeader,
 		return nil, fmt.Errorf("error converting validator set to proto object: %w", err)
 	}
 
-	return NewClientHeader(cc.PCfg.ClientType, signedHeaderProto, validatorSetProto, trustedValidatorsProto, trustedHeight)
+	return NewClientHeader(cc.ClientType(), signedHeaderProto, validatorSetProto, trustedValidatorsProto, trustedHeight)
 }
 
 // RelayPacketFromSequence relays a packet with a given seq on src and returns recvPacket msgs, timeoutPacketmsgs and error
@@ -1555,6 +1555,9 @@ func (cc *CosmosProvider) RelayPacketFromSequence(
 		return nil, nil, fmt.Errorf("no transactions returned with query")
 	case len(txs) > 1:
 		return nil, nil, fmt.Errorf("more than one transaction returned with query")
+	}
+	if txs[0].Height > int64(srch) {
+		return nil, nil, nil
 	}
 
 	rcvPackets, timeoutPackets, err := cc.relayPacketsFromResultTx(ctx, src, dst, int64(dsth), txs[0], dstChanId, dstPortId, dstClientId, srcChanId, srcPortId, srcClientId)
@@ -1889,19 +1892,19 @@ func (cc *CosmosProvider) GetLightSignedHeaderAtHeight(ctx context.Context, h in
 		return nil, err
 	}
 
-	if cc.PCfg.ClientType == ibcexported.Dymint {
+	if cc.ClientType() == ibcexported.Dymint {
 		return &types.Header{
 			SignedHeader: lightBlock.SignedHeader.ToProto(),
 			ValidatorSet: protoVal,
 		}, nil
 	}
-	if cc.PCfg.ClientType == ibcexported.Tendermint {
+	if cc.ClientType() == ibcexported.Tendermint {
 		return &tmclient.Header{
 			SignedHeader: lightBlock.SignedHeader.ToProto(),
 			ValidatorSet: protoVal,
 		}, nil
 	}
-	return nil, fmt.Errorf("unsupported client type %s", cc.PCfg.ClientType)
+	return nil, fmt.Errorf("unsupported client type %s", cc.ClientType())
 }
 
 // InjectTrustedFields injects the necessary trusted fields for a header to update a light
@@ -2012,6 +2015,10 @@ func (cc *CosmosProvider) NewClientState(
 		}, nil
 	}
 	return nil, fmt.Errorf("unsupported header client type %s", dstUpdateHeader.ClientType())
+}
+
+func (cc *CosmosProvider) ClientType() string {
+	return cc.PCfg.ClientType
 }
 
 func NewClientHeader(

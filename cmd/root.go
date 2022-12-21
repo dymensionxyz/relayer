@@ -29,9 +29,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dymensionxyz/dymint/settlement"
 	zaplogfmt "github.com/jsternberg/zap-logfmt"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	tlog "github.com/tendermint/tendermint/libs/log"
+	"github.com/tendermint/tendermint/libs/pubsub"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/term"
@@ -62,7 +65,8 @@ func NewRootCmd(log *zap.Logger) *cobra.Command {
 	a := &appState{
 		Viper: viper.New(),
 
-		Log: log,
+		Log:              log,
+		SettlementClient: &settlement.DymensionLayerClient{},
 	}
 
 	// RootCmd represents the base command when called without any subcommands
@@ -90,7 +94,19 @@ func NewRootCmd(log *zap.Logger) *cobra.Command {
 		}
 
 		// reads `homeDir/config/config.yaml` into `a.Config`
-		return initConfig(rootCmd, a)
+		err := initConfig(rootCmd, a)
+		if err != nil {
+			return err
+		}
+		if a.Config != nil && a.Config.Settlement != "" {
+			pubsubServer := pubsub.NewServer()
+			logger := tlog.NewTMLogger(tlog.NewSyncWriter(os.Stdout))
+			err = a.SettlementClient.Init([]byte(a.Config.Settlement), pubsubServer, logger)
+			if err != nil {
+				return fmt.Errorf("settlement layer client initialization error: %w", err)
+			}
+		}
+		return nil
 	}
 
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, _ []string) {
@@ -103,7 +119,6 @@ func NewRootCmd(log *zap.Logger) *cobra.Command {
 	if err := a.Viper.BindPFlag(flagHome, rootCmd.PersistentFlags().Lookup(flagHome)); err != nil {
 		panic(err)
 	}
-
 	// Register --debug flag
 	rootCmd.PersistentFlags().BoolVarP(&a.Debug, "debug", "d", false, "debug output")
 	if err := a.Viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug")); err != nil {

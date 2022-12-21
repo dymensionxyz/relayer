@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"fmt"
+	"github.com/dymensionxyz/dymint/settlement"
 	"sync"
 
 	"github.com/avast/retry-go/v4"
@@ -508,7 +509,7 @@ func RelayAcknowledgements(ctx context.Context, log *zap.Logger, src, dst *Chain
 }
 
 // RelayPackets creates transactions to relay packets from src to dst and from dst to src
-func RelayPackets(ctx context.Context, log *zap.Logger, src, dst *Chain, sp RelaySequences, maxTxSize, maxMsgLength uint64, memo string, srcChannel *chantypes.IdentifiedChannel) error {
+func RelayPackets(ctx context.Context, log *zap.Logger, src, dst *Chain, sp RelaySequences, maxTxSize, maxMsgLength uint64, memo string, srcChannel *chantypes.IdentifiedChannel, settlementClient *settlement.DymensionLayerClient) error {
 	// set the maximum relay transaction constraints
 	msgs := &RelayMsgs{
 		Src:          []provider.RelayerMessage{},
@@ -524,6 +525,16 @@ func RelayPackets(ctx context.Context, log *zap.Logger, src, dst *Chain, sp Rela
 		srch, dsth, err := QueryLatestHeights(ctx, src, dst)
 		if err != nil {
 			return err
+		}
+		srcFinalizedStateH, dstFinalizedStateH, err := QueryLatestFinalizedStateHeight(ctx, src, dst, settlementClient)
+		if err != nil {
+			return err
+		}
+		if srcFinalizedStateH != -1 && srcFinalizedStateH < srch {
+			srch = srcFinalizedStateH
+		}
+		if dstFinalizedStateH != -1 && dstFinalizedStateH < dsth {
+			dsth = dstFinalizedStateH
 		}
 
 		eg, egCtx := errgroup.WithContext(ctx)

@@ -123,6 +123,11 @@ $ %s cfg i`, appName, defaultHome, appName)),
 				return err
 			}
 
+			settlementConfig, err := cmd.Flags().GetString(flagSettlementConfig)
+			if err != nil {
+				return err
+			}
+
 			cfgDir := path.Join(home, "config")
 			cfgPath := path.Join(cfgDir, "config.yaml")
 
@@ -153,7 +158,7 @@ $ %s cfg i`, appName, defaultHome, appName)),
 				memo, _ := cmd.Flags().GetString(flagMemo)
 
 				// And write the default config to that location...
-				if _, err = f.Write(defaultConfig(memo)); err != nil {
+				if _, err = f.Write(defaultConfig(memo, settlementConfig)); err != nil {
 					return err
 				}
 
@@ -165,7 +170,9 @@ $ %s cfg i`, appName, defaultHome, appName)),
 			return fmt.Errorf("config already exists: %s", cfgPath)
 		},
 	}
-	return memoFlag(a.Viper, cmd)
+	cmd = memoFlag(a.Viper, cmd)
+	cmd = settlementConfigFlag(a.Viper, cmd)
+	return cmd
 }
 
 // addChainsFromDirectory finds all JSON-encoded config files in dir,
@@ -271,7 +278,7 @@ func (c *Config) Wrapped() *ConfigOutputWrapper {
 		}
 		providers[chain.ChainProvider.ChainName()] = pcfgw
 	}
-	return &ConfigOutputWrapper{Global: c.Global, ProviderConfigs: providers, Paths: c.Paths}
+	return &ConfigOutputWrapper{Global: c.Global, ProviderConfigs: providers, Paths: c.Paths, Settlement: c.Settlement}
 }
 
 // rlyMemo returns a formatted message memo string
@@ -302,9 +309,10 @@ func (c *Config) memo(cmd *cobra.Command) string {
 
 // Config represents the config file for the relayer
 type Config struct {
-	Global GlobalConfig   `yaml:"global" json:"global"`
-	Chains relayer.Chains `yaml:"chains" json:"chains"`
-	Paths  relayer.Paths  `yaml:"paths" json:"paths"`
+	Global     GlobalConfig   `yaml:"global" json:"global"`
+	Chains     relayer.Chains `yaml:"chains" json:"chains"`
+	Paths      relayer.Paths  `yaml:"paths" json:"paths"`
+	Settlement string         `yaml:"settlement" json:"settlement"`
 }
 
 // ConfigOutputWrapper is an intermediary type for writing the config to disk and stdout
@@ -312,6 +320,7 @@ type ConfigOutputWrapper struct {
 	Global          GlobalConfig    `yaml:"global" json:"global"`
 	ProviderConfigs ProviderConfigs `yaml:"chains" json:"chains"`
 	Paths           relayer.Paths   `yaml:"paths" json:"paths"`
+	Settlement      string          `yaml:"settlement" json:"settlement"`
 }
 
 // ConfigInputWrapper is an intermediary type for parsing the config.yaml file
@@ -319,6 +328,7 @@ type ConfigInputWrapper struct {
 	Global          GlobalConfig                          `yaml:"global"`
 	ProviderConfigs map[string]*ProviderConfigYAMLWrapper `yaml:"chains"`
 	Paths           relayer.Paths                         `yaml:"paths"`
+	Settlement      string                                `yaml:"settlement" json:"settlement"`
 }
 
 type ProviderConfigs map[string]*ProviderConfigWrapper
@@ -431,11 +441,12 @@ func (c Config) MustYAML() []byte {
 	return out
 }
 
-func defaultConfig(memo string) []byte {
+func defaultConfig(memo string, settlement string) []byte {
 	return Config{
-		Global: newDefaultGlobalConfig(memo),
-		Chains: relayer.Chains{},
-		Paths:  relayer.Paths{},
+		Global:     newDefaultGlobalConfig(memo),
+		Chains:     relayer.Chains{},
+		Paths:      relayer.Paths{},
+		Settlement: settlement,
 	}.MustYAML()
 }
 
@@ -584,9 +595,10 @@ func initConfig(cmd *cobra.Command, a *appState) error {
 			}
 
 			a.Config = &Config{
-				Global: cfgWrapper.Global,
-				Chains: chains,
-				Paths:  cfgWrapper.Paths,
+				Global:     cfgWrapper.Global,
+				Chains:     chains,
+				Paths:      cfgWrapper.Paths,
+				Settlement: cfgWrapper.Settlement,
 			}
 
 			// ensure config has []*relayer.Chain used for all chain operations

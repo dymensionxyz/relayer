@@ -324,6 +324,7 @@ type ChainProvider interface {
 
 	ChainName() string
 	ChainId() string
+	ClientType() string
 	Type() string
 	ProviderConfig() ProviderConfig
 	Key() string

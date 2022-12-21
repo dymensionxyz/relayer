@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"fmt"
+	"github.com/dymensionxyz/dymint/settlement"
 	"strings"
 
 	"github.com/avast/retry-go/v4"
@@ -28,6 +29,31 @@ func QueryLatestHeights(ctx context.Context, src, dst *Chain) (srch, dsth int64,
 	eg.Go(func() error {
 		var err error
 		dsth, err = dst.ChainProvider.QueryLatestHeight(egCtx)
+		return err
+	})
+	err = eg.Wait()
+	return
+}
+
+// QueryLatestFinalizedStateHeight returns the latest-finalized-state-info of multiple chains at once
+func QueryLatestFinalizedStateHeight(ctx context.Context, src, dst *Chain, settlementClient *settlement.DymensionLayerClient) (srch, dsth int64, err error) {
+	eg, _ := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		var err error
+		if src.ChainProvider.ClientType() == ibcexported.Dymint {
+			srch, err = settlementClient.GetLatestFinalizedStateHeight(src.ChainProvider.ChainId())
+		} else {
+			srch = -1
+		}
+		return err
+	})
+	eg.Go(func() error {
+		var err error
+		if dst.ChainProvider.ClientType() == ibcexported.Dymint {
+			dsth, err = settlementClient.GetLatestFinalizedStateHeight(dst.ChainProvider.ChainId())
+		} else {
+			dsth = -1
+		}
 		return err
 	})
 	err = eg.Wait()

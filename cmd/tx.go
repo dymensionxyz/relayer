@@ -751,15 +751,7 @@ $ %s tx relay-pkts demo-path channel-0`,
 				return err
 			}
 
-			err = a.SettlementClient.Start()
-			if err != nil {
-				return fmt.Errorf("error while starting settlement layer client: %w", err)
-			}
 			sp := relayer.UnrelayedSequences(cmd.Context(), c[src], c[dst], channel)
-			err = a.SettlementClient.Stop()
-			if err != nil {
-				return fmt.Errorf("error while stopping settlement layer client: %w", err)
-			}
 
 			if err = relayer.RelayPackets(cmd.Context(), a.Log, c[src], c[dst], sp, maxTxSize, maxMsgLength, a.Config.memo(cmd), channel, a.SettlementClient); err != nil {
 				return err

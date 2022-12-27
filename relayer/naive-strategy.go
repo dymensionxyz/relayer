@@ -3,7 +3,6 @@ package relayer
 import (
 	"context"
 	"fmt"
-	"github.com/dymensionxyz/dymint/settlement"
 	"sync"
 
 	"github.com/avast/retry-go/v4"
@@ -509,7 +508,7 @@ func RelayAcknowledgements(ctx context.Context, log *zap.Logger, src, dst *Chain
 }
 
 // RelayPackets creates transactions to relay packets from src to dst and from dst to src
-func RelayPackets(ctx context.Context, log *zap.Logger, src, dst *Chain, sp RelaySequences, maxTxSize, maxMsgLength uint64, memo string, srcChannel *chantypes.IdentifiedChannel, settlementClient *settlement.DymensionLayerClient) error {
+func RelayPackets(ctx context.Context, log *zap.Logger, src, dst *Chain, sp RelaySequences, maxTxSize, maxMsgLength uint64, memo string, srcChannel *chantypes.IdentifiedChannel, settlementClient *SettlementClient) error {
 	// set the maximum relay transaction constraints
 	msgs := &RelayMsgs{
 		Src:          []provider.RelayerMessage{},

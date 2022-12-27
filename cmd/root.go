@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cosmos/relayer/v2/relayer"
 	"io"
 	"os"
 	"os/signal"
@@ -29,12 +30,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dymensionxyz/dymint/settlement"
 	zaplogfmt "github.com/jsternberg/zap-logfmt"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	tlog "github.com/tendermint/tendermint/libs/log"
-	"github.com/tendermint/tendermint/libs/pubsub"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/term"
@@ -65,8 +63,7 @@ func NewRootCmd(log *zap.Logger) *cobra.Command {
 	a := &appState{
 		Viper: viper.New(),
 
-		Log:              log,
-		SettlementClient: &settlement.DymensionLayerClient{},
+		Log: log,
 	}
 
 	// RootCmd represents the base command when called without any subcommands
@@ -99,9 +96,7 @@ func NewRootCmd(log *zap.Logger) *cobra.Command {
 			return err
 		}
 		if a.Config != nil && a.Config.Settlement != "" {
-			pubsubServer := pubsub.NewServer()
-			logger := tlog.NewTMLogger(tlog.NewSyncWriter(os.Stdout))
-			err = a.SettlementClient.Init([]byte(a.Config.Settlement), pubsubServer, logger)
+			a.SettlementClient, err = relayer.NewSettlementClient([]byte(a.Config.Settlement))
 			if err != nil {
 				return fmt.Errorf("settlement layer client initialization error: %w", err)
 			}

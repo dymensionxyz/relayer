@@ -9,7 +9,6 @@ import (
 	"path"
 
 	"github.com/cosmos/relayer/v2/relayer"
-	"github.com/dymensionxyz/dymint/settlement"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -28,7 +27,7 @@ type appState struct {
 	Debug    bool
 	Config   *Config
 
-	SettlementClient *settlement.DymensionLayerClient
+	SettlementClient *relayer.SettlementClient
 }
 
 // AddPathFromFile modifies a.config.Paths to include the content stored in the given file.

@@ -14,7 +14,6 @@ import (
 	"github.com/cosmos/relayer/v2/relayer/processor"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	cosmosprovider "github.com/cosmos/relayer/v2/relayer/provider/cosmos"
-	"github.com/dymensionxyz/dymint/settlement"
 	"go.uber.org/zap"
 )
 
@@ -52,7 +51,7 @@ func StartRelayerWithSettlement(
 	memo string,
 	processorType string,
 	initialBlockHistory uint64,
-	settlementClient *settlement.DymensionLayerClient,
+	settlementClient *SettlementClient,
 ) chan error {
 	errorChan := make(chan error, 1)
 
@@ -147,23 +146,7 @@ func relayerStartEventProcessor(
 }
 
 // relayerMainLoop is the main loop of the relayer.
-func relayerMainLoop(ctx context.Context, log *zap.Logger, src, dst *Chain, filter ChannelFilter, maxTxSize, maxMsgLength uint64, memo string, settlementClient *settlement.DymensionLayerClient, errCh chan<- error) {
-	defer func() {
-		if settlementClient != nil {
-			err := settlementClient.Stop()
-			errCh <- fmt.Errorf("error while stopping settlement layer client: %w", err)
-		}
-		close(errCh)
-	}()
-
-	if settlementClient != nil {
-		err := settlementClient.Start()
-		if err != nil {
-			errCh <- fmt.Errorf("error while starting settlement layer client: %w", err)
-			return
-		}
-	}
-
+func relayerMainLoop(ctx context.Context, log *zap.Logger, src, dst *Chain, filter ChannelFilter, maxTxSize, maxMsgLength uint64, memo string, settlementClient *SettlementClient, errCh chan<- error) {
 	// Query the list of channels on the src connection.
 	srcChannels, err := queryChannelsOnConnection(ctx, src)
 	if err != nil {
@@ -332,7 +315,7 @@ func applyChannelFilterRule(filter ChannelFilter, channels []*types.IdentifiedCh
 }
 
 // relayUnrelayedPacketsAndAcks will relay all the pending packets and acknowledgements on both the src and dst chains.
-func relayUnrelayedPacketsAndAcks(ctx context.Context, log *zap.Logger, wg *sync.WaitGroup, src, dst *Chain, maxTxSize, maxMsgLength uint64, memo string, srcChannel *ActiveChannel, settlementClient *settlement.DymensionLayerClient, channels chan<- *ActiveChannel) {
+func relayUnrelayedPacketsAndAcks(ctx context.Context, log *zap.Logger, wg *sync.WaitGroup, src, dst *Chain, maxTxSize, maxMsgLength uint64, memo string, srcChannel *ActiveChannel, settlementClient *SettlementClient, channels chan<- *ActiveChannel) {
 	// make goroutine signal its death, whether it's a panic or a return
 	defer func() {
 		wg.Done()
@@ -360,7 +343,7 @@ func relayUnrelayedPacketsAndAcks(ctx context.Context, log *zap.Logger, wg *sync
 // relayUnrelayedPackets fetches unrelayed packet sequence numbers and attempts to relay the associated packets.
 // relayUnrelayedPackets returns true if packets were empty or were successfully relayed.
 // Otherwise, it logs the errors and returns false.
-func relayUnrelayedPackets(ctx context.Context, log *zap.Logger, src, dst *Chain, maxTxSize, maxMsgLength uint64, memo string, srcChannel *types.IdentifiedChannel, settlementClient *settlement.DymensionLayerClient) bool {
+func relayUnrelayedPackets(ctx context.Context, log *zap.Logger, src, dst *Chain, maxTxSize, maxMsgLength uint64, memo string, srcChannel *types.IdentifiedChannel, settlementClient *SettlementClient) bool {
 	// Fetch any unrelayed sequences depending on the channel order
 	sp := UnrelayedSequences(ctx, src, dst, srcChannel)
 

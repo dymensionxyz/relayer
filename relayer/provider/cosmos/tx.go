@@ -65,6 +65,87 @@ func (cc *CosmosProvider) SendMessage(ctx context.Context, msg provider.RelayerM
 	return cc.SendMessages(ctx, []provider.RelayerMessage{msg}, memo)
 }
 
+// BuildAndBroadcast attempts to sign, encode, & send a slice of RelayerMessages
+// A ewsponse is returned in case of success. In case of failure, the response is null
+// and boolean indicating if a transaction should be retried on case of failure is returned together with the error.
+func (cc *CosmosProvider) BuildAndBroadcast(ctx context.Context, msgs []provider.RelayerMessage, memo string) (*sdk.TxResponse, bool, error) {
+	txBytes, err := cc.buildMessages(ctx, msgs, memo)
+	if err != nil {
+		errMsg := err.Error()
+
+		// Occasionally the client will be out of date,
+		// and we will receive an RPC error like:
+		//     rpc error: code = InvalidArgument desc = failed to execute message; message index: 1: channel handshake open try failed: failed channel state verification for client (07-tendermint-0): client state height < proof height ({0 58} < {0 59}), please ensure the client has been updated: invalid height: invalid request
+		// or
+		//     rpc error: code = InvalidArgument desc = failed to execute message; message index: 1: receive packet verification failed: couldn't verify counterparty packet commitment: failed packet commitment verification for client (07-tendermint-0): client state height < proof height ({0 142} < {0 143}), please ensure the client has been updated: invalid height: invalid request
+		//
+		// No amount of retrying will fix this. The client needs to be updated.
+		// Unfortunately, the entirety of that error message originates on the server,
+		// so there is not an obvious way to access a more structured error value.
+		//
+		// If this logic should ever fail due to the string values of the error messages on the server
+		// changing from the client's version of the library,
+		// at worst this will run more unnecessary retries.
+		if strings.Contains(errMsg, sdkerrors.ErrInvalidHeight.Error()) {
+			cc.log.Info(
+				"Skipping retry due to invalid height error",
+				zap.Error(err),
+			)
+			return nil, false, err
+		}
+
+		// On a fast retry, it is possible to have an invalid connection state.
+		// Retrying that message also won't fix the underlying state mismatch,
+		// so log it and mark it as unrecoverable.
+		if strings.Contains(errMsg, conntypes.ErrInvalidConnectionState.Error()) {
+			cc.log.Info(
+				"Skipping retry due to invalid connection state",
+				zap.Error(err),
+			)
+			return nil, false, err
+		}
+
+		// Also possible to have an invalid channel state on a fast retry.
+		if strings.Contains(errMsg, chantypes.ErrInvalidChannelState.Error()) {
+			cc.log.Info(
+				"Skipping retry due to invalid channel state",
+				zap.Error(err),
+			)
+			return nil, false, err
+		}
+
+		// If the message reported an invalid proof, back off.
+		// NOTE: this error string ("invalid proof") will match other errors too,
+		// but presumably it is safe to stop retrying in those cases as well.
+		if strings.Contains(errMsg, commitmenttypes.ErrInvalidProof.Error()) {
+			cc.log.Info(
+				"Skipping retry due to invalid proof",
+				zap.Error(err),
+			)
+			return nil, false, err
+		}
+
+		// Invalid packets should not be retried either.
+		if strings.Contains(errMsg, chantypes.ErrInvalidPacket.Error()) {
+			cc.log.Info(
+				"Skipping retry due to invalid packet",
+				zap.Error(err),
+			)
+			return nil, false, err
+		}
+
+		return nil, true, err
+	}
+
+	resp, err := cc.BroadcastTx(ctx, txBytes)
+	if err != nil {
+		cc.log.Info(err.Error())
+		return nil, true, err
+	}
+
+	return resp, true, err
+}
+
 // SendMessages attempts to sign, encode, & send a slice of RelayerMessages
 // This is used extensively in the relayer as an extension of the Provider interface
 //
@@ -73,99 +154,23 @@ func (cc *CosmosProvider) SendMessage(ctx context.Context, msg provider.RelayerM
 // of that transaction will be logged. A boolean indicating if a transaction was successfully
 // sent and executed successfully is returned.
 func (cc *CosmosProvider) SendMessages(ctx context.Context, msgs []provider.RelayerMessage, memo string) (*provider.RelayerTxResponse, bool, error) {
-	var resp *sdk.TxResponse
+	// When bringing up a connection with a rollapp, there may be many failures until
+	// the state is accepted and finalized. The messages should be sent only when
+	// the dymension hub finalize the corresponding state to which the message belongs to.
+	// This is a special case of rollapp messages relying
 
-	if err := retry.Do(func() error {
-		txBytes, err := cc.buildMessages(ctx, msgs, memo)
-		if err != nil {
-			errMsg := err.Error()
-
-			// Occasionally the client will be out of date,
-			// and we will receive an RPC error like:
-			//     rpc error: code = InvalidArgument desc = failed to execute message; message index: 1: channel handshake open try failed: failed channel state verification for client (07-tendermint-0): client state height < proof height ({0 58} < {0 59}), please ensure the client has been updated: invalid height: invalid request
-			// or
-			//     rpc error: code = InvalidArgument desc = failed to execute message; message index: 1: receive packet verification failed: couldn't verify counterparty packet commitment: failed packet commitment verification for client (07-tendermint-0): client state height < proof height ({0 142} < {0 143}), please ensure the client has been updated: invalid height: invalid request
-			//
-			// No amount of retrying will fix this. The client needs to be updated.
-			// Unfortunately, the entirety of that error message originates on the server,
-			// so there is not an obvious way to access a more structured error value.
-			//
-			// If this logic should ever fail due to the string values of the error messages on the server
-			// changing from the client's version of the library,
-			// at worst this will run more unnecessary retries.
-			if strings.Contains(errMsg, sdkerrors.ErrInvalidHeight.Error()) {
-				cc.log.Info(
-					"Skipping retry due to invalid height error",
-					zap.Error(err),
-				)
-				return retry.Unrecoverable(err)
-			}
-
-			// On a fast retry, it is possible to have an invalid connection state.
-			// Retrying that message also won't fix the underlying state mismatch,
-			// so log it and mark it as unrecoverable.
-			if strings.Contains(errMsg, conntypes.ErrInvalidConnectionState.Error()) {
-				cc.log.Info(
-					"Skipping retry due to invalid connection state",
-					zap.Error(err),
-				)
-				return retry.Unrecoverable(err)
-			}
-
-			// Also possible to have an invalid channel state on a fast retry.
-			if strings.Contains(errMsg, chantypes.ErrInvalidChannelState.Error()) {
-				cc.log.Info(
-					"Skipping retry due to invalid channel state",
-					zap.Error(err),
-				)
-				return retry.Unrecoverable(err)
-			}
-
-			// If the message reported an invalid proof, back off.
-			// NOTE: this error string ("invalid proof") will match other errors too,
-			// but presumably it is safe to stop retrying in those cases as well.
-			if strings.Contains(errMsg, commitmenttypes.ErrInvalidProof.Error()) {
-				cc.log.Info(
-					"Skipping retry due to invalid proof",
-					zap.Error(err),
-				)
-				return retry.Unrecoverable(err)
-			}
-
-			// Invalid packets should not be retried either.
-			if strings.Contains(errMsg, chantypes.ErrInvalidPacket.Error()) {
-				cc.log.Info(
-					"Skipping retry due to invalid packet",
-					zap.Error(err),
-				)
-				return retry.Unrecoverable(err)
-			}
-
-			return err
-		}
-
-		resp, err = cc.BroadcastTx(ctx, txBytes)
-		if err != nil {
-			if err == sdkerrors.ErrWrongSequence {
-				// Allow retrying if we got an invalid sequence error when attempting to broadcast this tx.
-				return err
-			}
-
-			// Don't retry if BroadcastTx resulted in any other error.
-			// (This was the previous behavior. Unclear if that is still desired.)
-			return retry.Unrecoverable(err)
-		}
-
-		return nil
-	}, retry.Context(ctx), rtyAtt, rtyDel, rtyErr, retry.OnRetry(func(n uint, err error) {
+	// TODO - this should be replaced with more robust and go-style mechanism
+	n := 1
+	resp, retry, err := cc.BuildAndBroadcast(ctx, msgs, memo)
+	for retry && (err != nil || resp == nil) {
 		cc.log.Info(
-			"Error building or broadcasting transaction",
-			zap.String("chain_id", cc.PCfg.ChainID),
-			zap.Uint("attempt", n+1),
-			zap.Uint("max_attempts", rtyAttNum),
-			zap.Error(err),
-		)
-	})); err != nil || resp == nil {
+			fmt.Sprintf("attempt: %d, err: %s", n, err.Error()))
+		n += 1
+		time.Sleep(time.Millisecond * 5000)
+		resp, retry, err = cc.BuildAndBroadcast(context.Background(), msgs, memo)
+	}
+
+	if err != nil || resp == nil {
 		return nil, false, err
 	}
 

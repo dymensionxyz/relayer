@@ -1986,17 +1986,14 @@ func (cc *CosmosProvider) NewClientState(
 ) (ibcexported.ClientState, error) {
 	if dstUpdateHeader.ClientType() == ibcexported.Dymint {
 		return &types.ClientState{
-			ChainId:                      dstUpdateHeader.GetChainID(),
-			TrustLevel:                   types.NewFractionFromTm(light.DefaultTrustLevel),
-			TrustingPeriod:               dstTrustingPeriod,
-			UnbondingPeriod:              dstUbdPeriod,
-			MaxClockDrift:                time.Minute * 10,
-			FrozenHeight:                 clienttypes.ZeroHeight(),
-			LatestHeight:                 dstUpdateHeader.GetHeight().(clienttypes.Height),
-			ProofSpecs:                   commitmenttypes.GetSDKSpecs(),
-			UpgradePath:                  defaultUpgradePath,
-			AllowUpdateAfterExpiry:       allowUpdateAfterExpiry,
-			AllowUpdateAfterMisbehaviour: allowUpdateAfterMisbehaviour,
+			ChainId:         dstUpdateHeader.GetChainID(),
+			TrustingPeriod:  dstTrustingPeriod,
+			UnbondingPeriod: dstUbdPeriod,
+			MaxClockDrift:   time.Minute * 10,
+			FrozenHeight:    clienttypes.ZeroHeight(),
+			LatestHeight:    dstUpdateHeader.GetHeight().(clienttypes.Height),
+			ProofSpecs:      commitmenttypes.GetSDKSpecs(),
+			UpgradePath:     defaultUpgradePath,
 		}, nil
 	}
 	if dstUpdateHeader.ClientType() == ibcexported.Tendermint {
@@ -2140,5 +2137,5 @@ func castClientStateToTMType(cs *codectypes.Any) (*tmclient.ClientState, error) 
 	return clientState, nil
 }
 
-//DefaultUpgradePath is the default IBC upgrade path set for an on-chain light client
+// DefaultUpgradePath is the default IBC upgrade path set for an on-chain light client
 var defaultUpgradePath = []string{"upgrade", "upgradedIBCState"}

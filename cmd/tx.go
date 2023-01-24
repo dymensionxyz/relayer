@@ -753,7 +753,15 @@ $ %s tx relay-pkts demo-path channel-0`,
 
 			sp := relayer.UnrelayedSequences(cmd.Context(), c[src], c[dst], channel)
 
-			if err = relayer.RelayPackets(cmd.Context(), a.Log, c[src], c[dst], sp, maxTxSize, maxMsgLength, a.Config.memo(cmd), channel, a.SettlementClient); err != nil {
+			var settlementClient *relayer.SettlementClient
+			if a.Config.Settlement != "" {
+				settlementClient, err = relayer.NewSettlementClient([]byte(a.Config.Settlement))
+				if err != nil {
+					return fmt.Errorf("settlement layer client initialization error: %w", err)
+				}
+			}
+
+			if err = relayer.RelayPackets(cmd.Context(), a.Log, c[src], c[dst], sp, maxTxSize, maxMsgLength, a.Config.memo(cmd), channel, settlementClient); err != nil {
 				return err
 			}
 

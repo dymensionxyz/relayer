@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/cosmos/relayer/v2/relayer"
 	"io"
 	"os"
 	"os/signal"
@@ -94,12 +93,6 @@ func NewRootCmd(log *zap.Logger) *cobra.Command {
 		err := initConfig(rootCmd, a)
 		if err != nil {
 			return err
-		}
-		if a.Config != nil && a.Config.Settlement != "" {
-			a.SettlementClient, err = relayer.NewSettlementClient([]byte(a.Config.Settlement))
-			if err != nil {
-				return fmt.Errorf("settlement layer client initialization error: %w", err)
-			}
 		}
 		return nil
 	}

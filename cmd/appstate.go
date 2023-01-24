@@ -26,8 +26,6 @@ type appState struct {
 	HomePath string
 	Debug    bool
 	Config   *Config
-
-	SettlementClient *relayer.SettlementClient
 }
 
 // AddPathFromFile modifies a.config.Paths to include the content stored in the given file.

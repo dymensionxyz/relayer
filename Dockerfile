@@ -23,6 +23,9 @@ RUN export GOOS=${TARGETOS} GOARCH=${TARGETARCH} && \
 
 FROM alpine:latest
 
+RUN apk update && \
+  apk --no-cache add bash jq curl
+
 ENV RELAYER /relayer
 
 RUN addgroup rlyuser && adduser -S -G rlyuser rlyuser -h "$RELAYER"

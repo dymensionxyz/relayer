@@ -32,9 +32,9 @@ import (
 
 // Variables used for retries
 var (
-	rtyAttNum = uint(5)
+	rtyAttNum = uint(30)
 	rtyAtt    = retry.Attempts(rtyAttNum)
-	rtyDel    = retry.Delay(time.Millisecond * 400)
+	rtyDel    = retry.Delay(time.Second * 10)
 	rtyErr    = retry.LastErrorOnly(true)
 )
 
@@ -159,18 +159,34 @@ func (cc *CosmosProvider) SendMessages(ctx context.Context, msgs []provider.Rela
 	// the dymension hub finalize the corresponding state to which the message belongs to.
 	// This is a special case of rollapp messages relying
 
-	// TODO - this should be replaced with more robust and go-style mechanism
-	n := 1
-	resp, retry, err := cc.BuildAndBroadcast(ctx, msgs, memo)
-	for retry && (err != nil || resp == nil) {
-		cc.log.Info(
-			fmt.Sprintf("attempt: %d, err: %s", n, err.Error()))
-		n += 1
-		time.Sleep(time.Millisecond * 5000)
-		resp, retry, err = cc.BuildAndBroadcast(context.Background(), msgs, memo)
-	}
+	var resp *sdk.TxResponse = nil
 
-	if err != nil || resp == nil {
+	if err := retry.Do(func() error {
+		txResponse, bRetry, err := cc.BuildAndBroadcast(ctx, msgs, memo)
+		if err != nil {
+
+			if !bRetry {
+				cc.log.Info(
+					"Unrecoverable Error building or broadcasting transaction",
+					zap.String("chain_id", cc.PCfg.ChainID),
+					zap.Error(err))
+				return retry.Unrecoverable(err)
+			}
+
+			return err
+		}
+
+		resp = txResponse
+		return nil
+	}, retry.Context(ctx), rtyAtt, rtyDel, rtyErr, retry.OnRetry(func(n uint, err error) {
+		cc.log.Info(
+			"Error building or broadcasting transaction",
+			zap.String("chain_id", cc.PCfg.ChainID),
+			zap.Uint("attempt", n+1),
+			zap.Uint("max_attempts", rtyAttNum),
+			zap.Error(err),
+		)
+	})); err != nil || resp == nil {
 		return nil, false, err
 	}
 

@@ -686,8 +686,12 @@ func (pp *PathProcessor) assembleAndSendMessages(
 		dst.trackProcessingChannelMessage(m)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, messageSendTimeout)
-	defer cancel()
+	_, deadlineExists := ctx.Deadline()
+	if !deadlineExists {
+		newCtx, cancel := context.WithTimeout(ctx, messageSendTimeout)
+		ctx = newCtx
+		defer cancel()
+	}
 
 	_, txSuccess, err := dst.chainProvider.SendMessages(ctx, om.msgs, pp.memo)
 	if err != nil {

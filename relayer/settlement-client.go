@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"github.com/dymensionxyz/cosmosclient/cosmosclient"
 	rollapptypes "github.com/dymensionxyz/dymension/x/rollapp/types"
 	"github.com/ignite/cli/ignite/pkg/cosmosaccount"
@@ -31,6 +32,9 @@ type Config struct {
 	KeyRingHomeDir string                       `json:"keyring_home_dir"`
 	DymAccountName string                       `json:"dym_account_name"`
 	RollappID      string                       `json:"rollapp_id"`
+	GasLimit       uint64                       `json:"gas_limit"`
+	GasPrices      string                       `json:"gas_prices"`
+	GasFees        string                       `json:"gas_fees"`
 }
 
 func NewSettlementClient(config []byte) (*SettlementClient, error) {
@@ -95,9 +99,14 @@ func getConfig(config []byte) (*Config, error) {
 }
 
 func getCosmosClientOptions(config *Config) []cosmosclient.Option {
+	println(config.GasFees)
+	println(config)
 	options := []cosmosclient.Option{
 		cosmosclient.WithAddressPrefix(addressPrefix),
 		cosmosclient.WithNodeAddress(config.NodeAddress),
+		cosmosclient.WithGasFees(config.GasFees),
+		cosmosclient.WithGasLimit(config.GasLimit),
+		cosmosclient.WithGasPrices(config.GasPrices),
 	}
 	if config.KeyringBackend != "" {
 		options = append(options,

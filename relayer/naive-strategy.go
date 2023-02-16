@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/avast/retry-go/v4"
@@ -405,8 +406,13 @@ func RelayAcknowledgements(ctx context.Context, log *zap.Logger, src, dst *Chain
 			}
 		}
 
+		sort.Slice(sp.Src, func(i, j int) bool { return sp.Src[i] < sp.Src[j] })
+		limit := len(sp.Src)
+		if len(sp.Src) > 5 {
+			limit = 5
+		}
 		// add messages for received packets on src
-		for _, seq := range sp.Src[:10] {
+		for _, seq := range sp.Src[:limit] {
 			// src wrote the ack. acknowledgementFromSequence will query the acknowledgement
 			// from the counterparty chain (second chain provided in the arguments). The message
 			// should be sent to dst.

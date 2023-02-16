@@ -28,6 +28,8 @@ const (
 	ProcessorLegacy        = "legacy"
 )
 
+var GSettlementClient *SettlementClient
+
 // StartRelayer starts the main relaying loop and returns a channel that will contain any control-flow related errors.
 func StartRelayer(
 	ctx context.Context,
@@ -54,6 +56,8 @@ func StartRelayerWithSettlement(
 	settlementClient *SettlementClient,
 ) chan error {
 	errorChan := make(chan error, 1)
+
+	GSettlementClient = settlementClient
 
 	switch processorType {
 	case ProcessorEvents:

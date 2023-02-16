@@ -11,6 +11,8 @@ import (
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+
+	dyminttypes "github.com/cosmos/ibc-go/v3/modules/light-clients/01-dymint/types"
 )
 
 // UnrelayedSequences returns the unrelayed sequence numbers between two chains
@@ -244,9 +246,7 @@ func UnrelayedSequences(ctx context.Context, src, dst *Chain, srcChannel *chanty
 // UnrelayedAcknowledgements returns the unrelayed sequence numbers between two chains
 func UnrelayedAcknowledgements(ctx context.Context, src, dst *Chain, srcChannel *chantypes.IdentifiedChannel) RelaySequences {
 	var (
-		srcPacketSeq = []uint64{}
-		dstPacketSeq = []uint64{}
-		rs           = RelaySequences{Src: []uint64{}, Dst: []uint64{}}
+		rs = RelaySequences{Src: []uint64{}, Dst: []uint64{}}
 	)
 
 	srch, dsth, err := QueryLatestHeights(ctx, src, dst)
@@ -259,112 +259,73 @@ func UnrelayedAcknowledgements(ctx context.Context, src, dst *Chain, srcChannel 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		var (
-			res []*chantypes.PacketState
-			err error
-		)
-		if err = retry.Do(func() error {
-			// Query the packet commitment
-			res, err = src.ChainProvider.QueryPacketAcknowledgements(ctx, uint64(srch), srcChannel.ChannelId, srcChannel.PortId)
-			switch {
-			case err != nil:
-				return err
-			case res == nil:
-				return src.errQueryUnrelayedPacketAcks()
-			default:
-				return nil
-			}
-		}, retry.Context(ctx), RtyAtt, RtyDel, RtyErr); err != nil {
-			src.log.Error(
-				"Failed to query packet acknowledgement commitments after max attempts",
-				zap.String("channel_id", srcChannel.ChannelId),
-				zap.String("port_id", srcChannel.PortId),
-				zap.Uint("attempts", RtyAttNum),
-				zap.Error(err),
-			)
-			return
-		}
-		for _, pc := range res {
-			srcPacketSeq = append(srcPacketSeq, pc.Sequence)
-		}
+		rs.Src = unrelayedAcknowledgements(ctx,
+			src, srcChannel.ChannelId, srcChannel.PortId, srch,
+			dst, srcChannel.Counterparty.ChannelId, srcChannel.Counterparty.PortId, dsth)
 	}()
-
 	go func() {
 		defer wg.Done()
-		var (
-			res []*chantypes.PacketState
-			err error
+		rs.Dst = unrelayedAcknowledgements(ctx,
+			dst, srcChannel.Counterparty.ChannelId, srcChannel.Counterparty.PortId, dsth,
+			src, srcChannel.ChannelId, srcChannel.PortId, srch)
+	}()
+	wg.Wait()
+
+	return rs
+}
+
+// UnrelayedAcknowledgements returns the unrelayed sequence numbers between two chains
+func unrelayedAcknowledgements(ctx context.Context,
+	src *Chain, srcChannelId, srcPortId string, srch int64,
+	dst *Chain, dstChannelId, dstPortId string, dsth int64,
+) []uint64 {
+	var (
+		srcPacketSeq = []uint64{}
+		rs           = []uint64{}
+		res          []*chantypes.PacketState
+		err          error
+	)
+
+	if err = retry.Do(func() error {
+		res, err = src.ChainProvider.QueryPacketAcknowledgements(ctx, uint64(srch), srcChannelId, srcPortId)
+		switch {
+		case err != nil:
+			return err
+		case res == nil:
+			return src.errQueryUnrelayedPacketAcks()
+		default:
+			return nil
+		}
+	}, retry.Context(ctx), RtyAtt, RtyDel, RtyErr); err != nil {
+		src.log.Error(
+			"Failed to query packet acknowledgement commitments after max attempts",
+			zap.String("channel_id", srcChannelId),
+			zap.String("port_id", srcPortId),
+			zap.Uint("attempts", RtyAttNum),
+			zap.Error(err),
 		)
-		if err = retry.Do(func() error {
-			res, err = dst.ChainProvider.QueryPacketAcknowledgements(ctx, uint64(dsth), srcChannel.Counterparty.ChannelId, srcChannel.Counterparty.PortId)
-			switch {
-			case err != nil:
-				return err
-			case res == nil:
-				return dst.errQueryUnrelayedPacketAcks()
-			default:
-				return nil
-			}
+		return rs
+	}
+	for _, pc := range res {
+		srcPacketSeq = append(srcPacketSeq, pc.Sequence)
+	}
+
+	if len(srcPacketSeq) > 0 {
+		// Query all packets sent by dst that have been received by src
+		var err error
+		if err := retry.Do(func() error {
+			rs, err = dst.ChainProvider.QueryUnreceivedAcknowledgements(ctx, uint64(dsth), dstChannelId, dstPortId, srcPacketSeq)
+			return err
 		}, retry.Context(ctx), RtyAtt, RtyDel, RtyErr); err != nil {
 			dst.log.Error(
-				"Failed to query packet acknowledgement commitments after max attempts",
-				zap.String("channel_id", srcChannel.Counterparty.ChannelId),
-				zap.String("port_id", srcChannel.Counterparty.PortId),
+				"Failed to query unreceived acknowledgements after max attempts",
+				zap.String("channel_id", dstChannelId),
+				zap.String("port_id", dstPortId),
 				zap.Uint("attempts", RtyAttNum),
 				zap.Error(err),
 			)
-			return
 		}
-		for _, pc := range res {
-			dstPacketSeq = append(dstPacketSeq, pc.Sequence)
-		}
-	}()
-
-	wg.Wait()
-
-	if len(srcPacketSeq) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Query all packets sent by src that have been received by dst
-			var err error
-			if err := retry.Do(func() error {
-				rs.Src, err = dst.ChainProvider.QueryUnreceivedAcknowledgements(ctx, uint64(dsth), srcChannel.Counterparty.ChannelId, srcChannel.Counterparty.PortId, srcPacketSeq)
-				return err
-			}, retry.Context(ctx), RtyErr, RtyAtt, RtyDel); err != nil {
-				dst.log.Error(
-					"Failed to query unreceived acknowledgements after max attempts",
-					zap.String("channel_id", srcChannel.Counterparty.ChannelId),
-					zap.String("port_id", srcChannel.Counterparty.PortId),
-					zap.Uint("attempts", RtyAttNum),
-					zap.Error(err),
-				)
-			}
-		}()
 	}
-
-	if len(dstPacketSeq) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Query all packets sent by dst that have been received by src
-			var err error
-			if err := retry.Do(func() error {
-				rs.Dst, err = src.ChainProvider.QueryUnreceivedAcknowledgements(ctx, uint64(srch), srcChannel.ChannelId, srcChannel.PortId, dstPacketSeq)
-				return err
-			}, retry.Context(ctx), RtyAtt, RtyDel, RtyErr); err != nil {
-				src.log.Error(
-					"Failed to query unreceived acknowledgements after max attempts",
-					zap.String("channel_id", srcChannel.ChannelId),
-					zap.String("port_id", srcChannel.PortId),
-					zap.Uint("attempts", RtyAttNum),
-					zap.Error(err),
-				)
-			}
-		}()
-	}
-
-	wg.Wait()
 
 	return rs
 }
@@ -445,7 +406,7 @@ func RelayAcknowledgements(ctx context.Context, log *zap.Logger, src, dst *Chain
 		}
 
 		// add messages for received packets on src
-		for _, seq := range sp.Src {
+		for _, seq := range sp.Src[:10] {
 			// src wrote the ack. acknowledgementFromSequence will query the acknowledgement
 			// from the counterparty chain (second chain provided in the arguments). The message
 			// should be sent to dst.
@@ -473,7 +434,9 @@ func RelayAcknowledgements(ctx context.Context, log *zap.Logger, src, dst *Chain
 
 		// Prepend non-empty msg lists with UpdateClient
 		if len(msgs.Dst) != 0 {
-			msgs.Dst = append([]provider.RelayerMessage{dstUpdateMsg}, msgs.Dst...)
+			if srcHeader.(*dyminttypes.Header).TrustedHeight.RevisionHeight < uint64(srch) {
+				msgs.Dst = append([]provider.RelayerMessage{dstUpdateMsg}, msgs.Dst...)
+			}
 		}
 
 		if len(msgs.Src) != 0 {

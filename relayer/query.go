@@ -31,6 +31,20 @@ func QueryLatestHeights(ctx context.Context, src, dst *Chain) (srch, dsth int64,
 		return err
 	})
 	err = eg.Wait()
+
+	if err != nil {
+		return
+	}
+	srcFinalizedStateH, dstFinalizedStateH, err := QueryLatestFinalizedStateHeight(ctx, src, dst, GSettlementClient)
+	if err != nil {
+		return
+	}
+	if srcFinalizedStateH != -1 && srcFinalizedStateH < srch {
+		srch = srcFinalizedStateH
+	}
+	if dstFinalizedStateH != -1 && dstFinalizedStateH < dsth {
+		dsth = dstFinalizedStateH
+	}
 	return
 }
 

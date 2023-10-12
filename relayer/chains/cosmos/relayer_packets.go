@@ -3,8 +3,8 @@ package cosmos
 import (
 	"fmt"
 
-	clienttypes "github.com/cosmos/ibc-go/v5/modules/core/02-client/types"
-	chantypes "github.com/cosmos/ibc-go/v5/modules/core/04-channel/types"
+	clienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 )
 
@@ -66,7 +66,9 @@ func (rp relayMsgTimeout) Msg(src provider.ChainProvider, srcPortId, srcChanId, 
 		Signer:           addr,
 	}
 
-	return NewCosmosMessage(msg), nil
+	return NewCosmosMessage(msg, func(signer string) {
+		msg.Signer = signer
+	}), nil
 }
 
 type relayMsgRecvPacket struct {
@@ -129,7 +131,9 @@ func (rp relayMsgRecvPacket) Msg(src provider.ChainProvider, srcPortId, srcChanI
 		Signer:          addr,
 	}
 
-	return NewCosmosMessage(msg), nil
+	return NewCosmosMessage(msg, func(signer string) {
+		msg.Signer = signer
+	}), nil
 }
 
 type relayMsgPacketAck struct {
@@ -184,5 +188,7 @@ func (rp relayMsgPacketAck) Msg(src provider.ChainProvider, srcPortId, srcChanId
 		Signer:          addr,
 	}
 
-	return NewCosmosMessage(msg), nil
+	return NewCosmosMessage(msg, func(signer string) {
+		msg.Signer = signer
+	}), nil
 }

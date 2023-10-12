@@ -3,10 +3,21 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/cosmos/relayer/v2/relayer"
-	"github.com/spf13/cobra"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/cosmos/cosmos-sdk/client"
+	"github.com/cosmos/cosmos-sdk/types/query"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
+	"github.com/cosmos/relayer/v2/relayer"
+	"github.com/cosmos/relayer/v2/relayer/chains/cosmos"
+	"github.com/spf13/cobra"
+)
+
+const (
+	formatJson   = "json"
+	formatLegacy = "legacy"
 )
 
 // queryCmd represents the chain command
@@ -41,8 +52,23 @@ func queryCmd(a *appState) *cobra.Command {
 		lineBreakCommand(),
 		queryIBCDenoms(a),
 		queryBaseDenomFromIBCDenom(a),
+		feegrantQueryCmd(a),
 	)
 
+	return cmd
+}
+
+// feegrantQueryCmd returns the fee grant query commands for this module
+func feegrantQueryCmd(a *appState) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "feegrant",
+		Short: "Querying commands for the feegrant module [currently BasicAllowance only]",
+	}
+
+	cmd.AddCommand(
+		feegrantBasicGrantsCmd(a),
+	)
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -57,7 +83,7 @@ $ %s q ibc-denoms ibc-0`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -78,7 +104,7 @@ $ %s q ibc-denoms ibc-0`,
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -93,7 +119,7 @@ $ %s q denom-trace osmosis 9BBA9A1C257E971E38C1422780CE6F0B0686F0A3085E2D61118D9
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, ok := a.Config.Chains[args[0]]
+			c, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -106,7 +132,7 @@ $ %s q denom-trace osmosis 9BBA9A1C257E971E38C1422780CE6F0B0686F0A3085E2D61118D9
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -121,7 +147,7 @@ $ %s q tx ibc-0 A5DF8D272F1C451CFF92BA6C41942C4D29B5CF180279439ED6AB038282F956BE
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -140,7 +166,7 @@ $ %s q tx ibc-0 A5DF8D272F1C451CFF92BA6C41942C4D29B5CF180279439ED6AB038282F956BE
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -162,7 +188,7 @@ $ %s q txs ibc-0 "message.action=transfer"`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -192,7 +218,9 @@ $ %s q txs ibc-0 "message.action=transfer"`,
 		},
 	}
 
-	return paginationFlags(a.Viper, cmd, "txs")
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = paginationFlags(a.viper, cmd, "txs")
+	return cmd
 }
 
 func queryBalanceCmd(a *appState) *cobra.Command {
@@ -207,7 +235,7 @@ $ %s query balance ibc-0 testkey`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -236,12 +264,34 @@ $ %s query balance ibc-0 testkey`,
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "address {%s} balance {%s} \n", addr, coins)
+			// Create a map to hold the data
+			data := map[string]string{
+				"address": addr,
+				"balance": coins.String(),
+			}
+
+			// Convert the map to a JSON string
+			jsonOutput, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+
+			output, _ := cmd.Flags().GetString(flagOutput)
+			switch output {
+			case formatJson:
+				fmt.Fprint(cmd.OutOrStdout(), string(jsonOutput))
+			case formatLegacy:
+				fallthrough
+			default:
+				fmt.Fprintf(cmd.OutOrStdout(), "address {%s} balance {%s} \n", addr, coins)
+			}
 			return nil
 		},
 	}
 
-	return ibcDenomFlags(a.Viper, cmd)
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = ibcDenomFlags(a.viper, cmd)
+	return cmd
 }
 
 func queryHeaderCmd(a *appState) *cobra.Command {
@@ -255,7 +305,7 @@ $ %s query header ibc-0 1400`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -288,11 +338,21 @@ $ %s query header ibc-0 1400`,
 				return err
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), s)
+			output, _ := cmd.Flags().GetString(flagOutput)
+			switch output {
+			case formatJson:
+				fmt.Fprintln(cmd.OutOrStdout(), string(s))
+			case formatLegacy:
+				fallthrough
+			default:
+				fmt.Fprintln(cmd.OutOrStdout(), s)
+			}
+
 			return nil
 		},
 	}
 
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -309,7 +369,7 @@ $ %s q node-state ibc-1`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -334,7 +394,7 @@ $ %s q node-state ibc-1`,
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -349,7 +409,7 @@ $ %s query client ibc-0 ibczeroclient --height 1205`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -385,8 +445,9 @@ $ %s query client ibc-0 ibczeroclient --height 1205`,
 			return nil
 		},
 	}
-
-	return heightFlag(a.Viper, cmd)
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = heightFlag(a.viper, cmd)
+	return cmd
 }
 
 func queryClientsCmd(a *appState) *cobra.Command {
@@ -401,7 +462,7 @@ $ %s query clients ibc-2 --offset 2 --limit 30`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -430,8 +491,9 @@ $ %s query clients ibc-2 --offset 2 --limit 30`,
 			return nil
 		},
 	}
-
-	return paginationFlags(a.Viper, cmd, "client states")
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = paginationFlags(a.viper, cmd, "client states")
+	return cmd
 }
 
 func queryConnections(a *appState) *cobra.Command {
@@ -447,7 +509,7 @@ $ %s q conns ibc-1`,
 			appName, appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -477,7 +539,9 @@ $ %s q conns ibc-1`,
 		},
 	}
 
-	return paginationFlags(a.Viper, cmd, "connections on a network")
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = paginationFlags(a.viper, cmd, "connections on a network")
+	return cmd
 }
 
 func queryConnectionsUsingClient(a *appState) *cobra.Command {
@@ -493,7 +557,7 @@ $ %s query client-connections ibc-0 ibczeroclient --height 1205`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			//TODO - Add pagination
 
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -530,7 +594,9 @@ $ %s query client-connections ibc-0 ibczeroclient --height 1205`,
 		},
 	}
 
-	return heightFlag(a.Viper, cmd)
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = heightFlag(a.viper, cmd)
+	return cmd
 }
 
 func queryConnection(a *appState) *cobra.Command {
@@ -545,7 +611,7 @@ $ %s q conn ibc-1 ibconeconn`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -574,7 +640,7 @@ $ %s q conn ibc-1 ibconeconn`,
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -589,7 +655,7 @@ $ %s query connection-channels ibc-2 ibcconnection2 --offset 2 --limit 30`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -623,7 +689,9 @@ $ %s query connection-channels ibc-2 ibcconnection2 --offset 2 --limit 30`,
 		},
 	}
 
-	return paginationFlags(a.Viper, cmd, "channels associated with a connection")
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = paginationFlags(a.viper, cmd, "channels associated with a connection")
+	return cmd
 }
 
 func queryChannel(a *appState) *cobra.Command {
@@ -637,7 +705,7 @@ $ %s query channel ibc-2 ibctwochannel transfer --height 1205`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -676,51 +744,231 @@ $ %s query channel ibc-2 ibctwochannel transfer --height 1205`,
 		},
 	}
 
-	return heightFlag(a.Viper, cmd)
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = heightFlag(a.viper, cmd)
+	return cmd
+}
+
+// chanExtendedInfo is an intermediate type for holding additional useful
+// channel information regarding IBC hierarchy of clients/conns/chans.
+type chanExtendedInfo struct {
+	clientID             string
+	counterpartyChainID  string
+	counterpartyConnID   string
+	counterpartyClientID string
+}
+
+func printChannelWithExtendedInfo(
+	cmd *cobra.Command,
+	chain *relayer.Chain,
+	channel *chantypes.IdentifiedChannel,
+	extendedInfo *chanExtendedInfo) {
+	s, err := chain.ChainProvider.Sprint(channel)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to marshal channel: %v\n", err)
+		return
+	}
+
+	if extendedInfo == nil || len(channel.ConnectionHops) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), s)
+		return
+	}
+
+	asJson := make(map[string]any)
+	if err := json.Unmarshal([]byte(s), &asJson); err != nil {
+		fmt.Fprintln(cmd.OutOrStdout(), s)
+		return
+	}
+
+	asJson["chain_id"] = chain.ChainProvider.ChainId()
+	asJson["client_id"] = extendedInfo.clientID
+	counterparty, ok := asJson["counterparty"].(map[string]any)
+	if ok {
+		counterparty["chain_id"] = extendedInfo.counterpartyChainID
+		counterparty["client_id"] = extendedInfo.counterpartyClientID
+		counterparty["connection_id"] = extendedInfo.counterpartyConnID
+	}
+
+	newJson, err := json.Marshal(asJson)
+	if err != nil {
+		fmt.Fprintln(cmd.OutOrStdout(), s)
+		return
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), string(newJson))
+}
+
+const concurrentQueries = 10
+
+func queryChannelsToChain(cmd *cobra.Command, chain *relayer.Chain, dstChain *relayer.Chain) error {
+	ctx := cmd.Context()
+
+	clients, err := chain.ChainProvider.QueryClients(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, client := range clients {
+		clientInfo, err := relayer.ClientInfoFromClientState(client.ClientState)
+		if err != nil {
+			continue
+		}
+		if clientInfo.ChainID != dstChain.ChainProvider.ChainId() {
+			continue
+		}
+		connections, err := chain.ChainProvider.QueryConnectionsUsingClient(ctx, 0, client.ClientId)
+		if err != nil {
+			continue
+		}
+
+		var wg sync.WaitGroup
+		i := 0
+		for _, conn := range connections.Connections {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				channels, err := chain.ChainProvider.QueryConnectionChannels(ctx, 0, conn.Id)
+				if err != nil {
+					return
+				}
+				for _, channel := range channels {
+					printChannelWithExtendedInfo(cmd, chain, channel, &chanExtendedInfo{
+						clientID:             client.ClientId,
+						counterpartyChainID:  clientInfo.ChainID,
+						counterpartyClientID: conn.Counterparty.ClientId,
+						counterpartyConnID:   conn.Counterparty.ConnectionId,
+					})
+				}
+			}()
+			i++
+			if i%concurrentQueries == 0 {
+				wg.Wait()
+			}
+		}
+		wg.Wait()
+	}
+
+	return nil
+}
+
+func queryChannelsPaginated(cmd *cobra.Command, chain *relayer.Chain, pageReq *query.PageRequest) error {
+	var chans []*chantypes.IdentifiedChannel
+	var next []byte
+	var err error
+
+	ctx := cmd.Context()
+
+	ccp, isCosmosChain := chain.ChainProvider.(*cosmos.CosmosProvider)
+	if isCosmosChain {
+		chans, next, err = ccp.QueryChannelsPaginated(ctx, pageReq)
+	} else {
+		chans, err = chain.ChainProvider.QueryChannels(ctx)
+	}
+	if err != nil {
+		return err
+	}
+
+	uniqueConns := make(map[string]interface{})
+
+	for _, channel := range chans {
+		if len(channel.ConnectionHops) == 0 {
+			continue
+		}
+		uniqueConns[channel.ConnectionHops[0]] = struct{}{}
+	}
+
+	connectionClients := make(map[string]chanExtendedInfo)
+	var mu sync.Mutex
+
+	var wg sync.WaitGroup
+	i := 0
+	for c := range uniqueConns {
+		wg.Add(1)
+		c := c
+		go func() {
+			defer wg.Done()
+			conn, err := chain.ChainProvider.QueryConnection(ctx, 0, c)
+			if err != nil {
+				return
+			}
+			client, err := chain.ChainProvider.QueryClientStateResponse(ctx, 0, conn.Connection.ClientId)
+			if err != nil {
+				return
+			}
+			clientInfo, err := relayer.ClientInfoFromClientState(client.ClientState)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			connectionClients[c] = chanExtendedInfo{
+				clientID:             conn.Connection.ClientId,
+				counterpartyClientID: conn.Connection.Counterparty.ClientId,
+				counterpartyConnID:   conn.Connection.Counterparty.ConnectionId,
+				counterpartyChainID:  clientInfo.ChainID,
+			}
+		}()
+		i++
+		if i%concurrentQueries == 0 {
+			wg.Wait()
+		}
+	}
+
+	wg.Wait()
+
+	for _, channel := range chans {
+		chanInfo, ok := connectionClients[channel.ConnectionHops[0]]
+		if !ok {
+			printChannelWithExtendedInfo(cmd, chain, channel, nil)
+			continue
+		}
+		printChannelWithExtendedInfo(cmd, chain, channel, &chanInfo)
+	}
+
+	if isCosmosChain {
+		fmt.Fprintf(cmd.ErrOrStderr(), "\nPagination next key: %s\n", string(next))
+	}
+
+	return nil
 }
 
 func queryChannels(a *appState) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "channels chain_name",
+		Use:   "channels [src_chain_name] [dst_chain_name]?",
 		Short: "query for all channels on a network by chain ID",
-		Args:  withUsage(cobra.ExactArgs(1)),
+		Args:  withUsage(cobra.RangeArgs(1, 2)),
 		Example: strings.TrimSpace(fmt.Sprintf(`
 $ %s query channels ibc-0
-$ %s query channels ibc-2 --offset 2 --limit 30`,
-			appName, appName,
+$ %s query channels ibc-2 --offset 2 --limit 30
+$ %s query channels ibc-0 ibc-2`,
+			appName, appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
 
-			// TODO fix pagination
-			//pagereq, err := client.ReadPageRequest(cmd.Flags())
-			//if err != nil {
-			//	return err
-			//}
+			if len(args) > 1 {
+				dstChain, ok := a.config.Chains[args[1]]
+				if !ok {
+					return errChainNotFound(args[1])
+				}
+				return queryChannelsToChain(cmd, chain, dstChain)
+			}
 
-			res, err := chain.ChainProvider.QueryChannels(cmd.Context())
+			pageReq, err := client.ReadPageRequest(cmd.Flags())
 			if err != nil {
 				return err
 			}
 
-			for _, channel := range res {
-				s, err := chain.ChainProvider.Sprint(channel)
-				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Failed to marshal channel: %v\n", err)
-					continue
-				}
-
-				fmt.Fprintln(cmd.OutOrStdout(), s)
-			}
-
-			return nil
+			return queryChannelsPaginated(cmd, chain, pageReq)
 		},
 	}
 
-	return paginationFlags(a.Viper, cmd, "channels on a network")
+	cmd = addOutputFlag(a.viper, cmd)
+	cmd = paginationFlags(a.viper, cmd, "channels on a network")
+	return cmd
 }
 
 func queryPacketCommitment(a *appState) *cobra.Command {
@@ -734,7 +982,7 @@ $ %s q packet-commit ibc-1 ibconechannel transfer 31`,
 			appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			chain, ok := a.Config.Chains[args[0]]
+			chain, ok := a.config.Chains[args[0]]
 			if !ok {
 				return errChainNotFound(args[0])
 			}
@@ -762,7 +1010,7 @@ $ %s q packet-commit ibc-1 ibconechannel transfer 31`,
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -779,14 +1027,14 @@ $ %s query unrelayed-pkts demo-path channel-0`,
 			appName, appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := a.Config.Paths.Get(args[0])
+			path, err := a.config.Paths.Get(args[0])
 			if err != nil {
 				return err
 			}
 
 			src, dst := path.Src.ChainID, path.Dst.ChainID
 
-			c, err := a.Config.Chains.Gets(src, dst)
+			c, err := a.config.Chains.Gets(src, dst)
 			if err != nil {
 				return err
 			}
@@ -815,7 +1063,7 @@ $ %s query unrelayed-pkts demo-path channel-0`,
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
@@ -832,13 +1080,13 @@ $ %s query unrelayed-acks demo-path channel-0`,
 			appName, appName, appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := a.Config.Paths.Get(args[0])
+			path, err := a.config.Paths.Get(args[0])
 			if err != nil {
 				return err
 			}
 			src, dst := path.Src.ChainID, path.Dst.ChainID
 
-			c, err := a.Config.Chains.Gets(src, dst)
+			c, err := a.config.Chains.Gets(src, dst)
 			if err != nil {
 				return err
 			}
@@ -867,26 +1115,27 @@ $ %s query unrelayed-acks demo-path channel-0`,
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }
 
 func queryClientsExpiration(a *appState) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "clients-expiration path",
-		Short: "query for light clients expiration date",
-		Args:  withUsage(cobra.ExactArgs(1)),
+		Use:     "clients-expiration path",
+		Aliases: []string{"ce"},
+		Short:   "query for light clients expiration date",
+		Args:    withUsage(cobra.ExactArgs(1)),
 		Example: strings.TrimSpace(fmt.Sprintf(`
 $ %s query clients-expiration demo-path`,
 			appName,
 		)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := a.Config.Paths.Get(args[0])
+			path, err := a.config.Paths.Get(args[0])
 			if err != nil {
 				return err
 			}
 			src, dst := path.Src.ChainID, path.Dst.ChainID
-			c, err := a.Config.Chains.Gets(src, dst)
+			c, err := a.config.Chains.Gets(src, dst)
 			if err != nil {
 				return err
 			}
@@ -898,21 +1147,35 @@ $ %s query clients-expiration demo-path`,
 				return err
 			}
 
-			srcExpiration, err := relayer.QueryClientExpiration(cmd.Context(), c[src], c[dst])
-			if err != nil {
-				return err
+			srcExpiration, srcClientInfo, errSrc := relayer.QueryClientExpiration(cmd.Context(), c[src], c[dst])
+			if errSrc != nil && !strings.Contains(errSrc.Error(), "light client not found") {
+				return errSrc
 			}
-			dstExpiration, err := relayer.QueryClientExpiration(cmd.Context(), c[dst], c[src])
-			if err != nil {
-				return err
+			dstExpiration, dstClientInfo, errDst := relayer.QueryClientExpiration(cmd.Context(), c[dst], c[src])
+			if errDst != nil && !strings.Contains(errDst.Error(), "light client not found") {
+				return errDst
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), relayer.SPrintClientExpiration(c[src], srcExpiration))
-			fmt.Fprintf(cmd.OutOrStdout(), relayer.SPrintClientExpiration(c[dst], dstExpiration))
+			output, _ := cmd.Flags().GetString(flagOutput)
 
+			srcClientExpiration := relayer.SPrintClientExpiration(c[src], srcExpiration, srcClientInfo)
+			dstClientExpiration := relayer.SPrintClientExpiration(c[dst], dstExpiration, dstClientInfo)
+
+			if output == formatJson {
+				srcClientExpiration = relayer.SPrintClientExpirationJson(c[src], srcExpiration, srcClientInfo)
+				dstClientExpiration = relayer.SPrintClientExpirationJson(c[dst], dstExpiration, dstClientInfo)
+			}
+
+			if errSrc == nil {
+				fmt.Fprintln(cmd.OutOrStdout(), srcClientExpiration)
+			}
+
+			if errDst == nil {
+				fmt.Fprintln(cmd.OutOrStdout(), dstClientExpiration)
+			}
 			return nil
 		},
 	}
-
+	cmd = addOutputFlag(a.viper, cmd)
 	return cmd
 }

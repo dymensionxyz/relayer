@@ -2,17 +2,16 @@ package relayer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/avast/retry-go/v4"
-	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	clienttypes "github.com/cosmos/ibc-go/v5/modules/core/02-client/types"
-	chantypes "github.com/cosmos/ibc-go/v5/modules/core/04-channel/types"
-	ibcexported "github.com/cosmos/ibc-go/v5/modules/core/exported"
-	tmclient "github.com/cosmos/ibc-go/v5/modules/light-clients/07-tendermint/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
+	ibcexported "github.com/cosmos/ibc-go/v7/modules/core/exported"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -230,34 +229,6 @@ func QueryIBCHeaders(ctx context.Context, src, dst *Chain, srch, dsth int64) (sr
 	return
 }
 
-// QueryTMClientState retrieves the latest consensus state for a client in state at a given height
-// and unpacks/cast it to tendermint clientstate
-func (c *Chain) QueryTMClientState(ctx context.Context, height int64) (*tmclient.ClientState, error) {
-	clientStateRes, err := c.ChainProvider.QueryClientStateResponse(ctx, height, c.ClientID())
-	if err != nil {
-		return &tmclient.ClientState{}, err
-	}
-
-	return CastClientStateToTMType(clientStateRes.ClientState)
-}
-
-// CastClientStateToTMType casts client state to tendermint type
-func CastClientStateToTMType(cs *codectypes.Any) (*tmclient.ClientState, error) {
-	clientStateExported, err := clienttypes.UnpackClientState(cs)
-	if err != nil {
-		return &tmclient.ClientState{}, err
-	}
-
-	// cast from interface to concrete type
-	clientState, ok := clientStateExported.(*tmclient.ClientState)
-	if !ok {
-		return &tmclient.ClientState{},
-			fmt.Errorf("error when casting exported clientstate to tendermint type")
-	}
-
-	return clientState, nil
-}
-
 // QueryBalance is a helper function for query balance
 func QueryBalance(ctx context.Context, chain *Chain, address string, showDenoms bool) (sdk.Coins, error) {
 	coins, err := chain.ChainProvider.QueryBalanceWithAddress(ctx, address)
@@ -303,35 +274,80 @@ func QueryBalance(ctx context.Context, chain *Chain, address string, showDenoms 
 	return out, nil
 }
 
-func QueryClientExpiration(ctx context.Context, src, dst *Chain) (time.Time, error) {
+func QueryClientExpiration(ctx context.Context, src, dst *Chain) (time.Time, ClientStateInfo, error) {
 	latestHeight, err := src.ChainProvider.QueryLatestHeight(ctx)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, ClientStateInfo{}, err
 	}
 
-	clientState, err := src.QueryTMClientState(ctx, latestHeight)
+	clientStateRes, err := src.ChainProvider.QueryClientStateResponse(ctx, latestHeight, src.ClientID())
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, ClientStateInfo{}, err
 	}
 
-	trustingPeriod := clientState.TrustingPeriod
-	clientTime, err := dst.ChainProvider.BlockTime(ctx, int64(clientState.GetLatestHeight().GetRevisionHeight()))
+	clientInfo, err := ClientInfoFromClientState(clientStateRes.ClientState)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, ClientStateInfo{}, err
 	}
 
-	return clientTime.Add(trustingPeriod), nil
+	clientTime, err := dst.ChainProvider.BlockTime(ctx, int64(clientInfo.LatestHeight.GetRevisionHeight()))
+	if err != nil {
+		return time.Time{}, ClientStateInfo{}, err
+	}
+
+	return clientTime.Add(clientInfo.TrustingPeriod), clientInfo, nil
 }
 
-func SPrintClientExpiration(chain *Chain, expiration time.Time) string {
+func SPrintClientExpiration(chain *Chain, expiration time.Time, clientInfo ClientStateInfo) string {
 	now := time.Now()
 	remainingTime := expiration.Sub(now)
 	expirationFormatted := expiration.Format(time.RFC822)
 
-	if remainingTime < 0 {
-		return fmt.Sprintf("client %s (%s) is already expired (%s)\n",
-			chain.ClientID(), chain.ChainID(), expirationFormatted)
+	var status string
+	if remainingTime <= 0 {
+		status = "EXPIRED"
+	} else {
+		status = "GOOD"
 	}
-	return fmt.Sprintf("client %s (%s) expires in %s (%s)\n",
-		chain.ClientID(), chain.ChainID(), remainingTime.Round(time.Second), expirationFormatted)
+
+	legacyOutput := fmt.Sprintf(`
+	client: %s (%s)
+		HEALTH:              %s
+		TIME:                %s (%s)
+		LAST UPDATE HEIGHT:  %d
+		TRUSTING PERIOD:     %s
+	`,
+		chain.ClientID(), chain.ChainID(), status, expirationFormatted, remainingTime.Round(time.Second), clientInfo.LatestHeight.GetRevisionHeight(), clientInfo.TrustingPeriod.String())
+
+	return legacyOutput
+
+}
+
+// Returns clientExpiration data in JSON format.
+func SPrintClientExpirationJson(chain *Chain, expiration time.Time, clientInfo ClientStateInfo) string {
+	now := time.Now()
+	remainingTime := expiration.Sub(now)
+	expirationFormatted := expiration.Format(time.RFC822)
+
+	var status string
+	if remainingTime <= 0 {
+		status = "EXPIRED"
+	} else {
+		status = "GOOD"
+	}
+
+	data := map[string]string{
+		"client":             fmt.Sprintf("%s (%s)", chain.ClientID(), chain.ChainID()),
+		"HEALTH":             status,
+		"TIME":               fmt.Sprintf("%s (%s)", expirationFormatted, remainingTime.Round(time.Second)),
+		"LAST UPDATE HEIGHT": strconv.FormatUint(clientInfo.LatestHeight.GetRevisionHeight(), 10),
+		"TRUSTING PERIOD":    clientInfo.TrustingPeriod.String(),
+	}
+
+	jsonOutput, err := json.Marshal(data)
+	if err != nil {
+		jsonOutput = []byte{}
+	}
+
+	return string(jsonOutput)
 }

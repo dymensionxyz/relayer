@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	chantypes "github.com/cosmos/ibc-go/v5/modules/core/04-channel/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	"go.uber.org/zap/zapcore"
 )
@@ -17,6 +17,12 @@ import (
 type MessageLifecycle interface {
 	messageLifecycler() //noop
 }
+
+// Flush lifecycle informs the PathProcessor to terminate once
+// all pending messages have been flushed.
+type FlushLifecycle struct{}
+
+func (t *FlushLifecycle) messageLifecycler() {}
 
 type PacketMessage struct {
 	ChainID   string
@@ -66,6 +72,18 @@ type ChannelMessageLifecycle struct {
 
 func (t *ChannelMessageLifecycle) messageLifecycler() {}
 
+// ChannelCloseLifecycle is used as a stop condition for the PathProcessor.
+// It will attempt to finish closing the channel and terminate once the channel is closed.
+type ChannelCloseLifecycle struct {
+	SrcChainID   string
+	SrcChannelID string
+	SrcPortID    string
+	SrcConnID    string
+	DstConnID    string
+}
+
+func (t *ChannelCloseLifecycle) messageLifecycler() {}
+
 // IBCMessagesCache holds cached messages for packet flows, connection handshakes,
 // and channel handshakes. The PathProcessors use this for message correlation to determine
 // when messages should be sent and are pruned when flows/handshakes are complete.
@@ -75,6 +93,7 @@ type IBCMessagesCache struct {
 	PacketFlow          ChannelPacketMessagesCache
 	ConnectionHandshake ConnectionMessagesCache
 	ChannelHandshake    ChannelMessagesCache
+	ClientICQ           ClientICQMessagesCache
 }
 
 // Clone makes a deep copy of an IBCMessagesCache.
@@ -83,10 +102,12 @@ func (c IBCMessagesCache) Clone() IBCMessagesCache {
 		PacketFlow:          make(ChannelPacketMessagesCache, len(c.PacketFlow)),
 		ConnectionHandshake: make(ConnectionMessagesCache, len(c.ConnectionHandshake)),
 		ChannelHandshake:    make(ChannelMessagesCache, len(c.ChannelHandshake)),
+		ClientICQ:           make(ClientICQMessagesCache, len(c.ClientICQ)),
 	}
 	x.PacketFlow.Merge(c.PacketFlow)
 	x.ConnectionHandshake.Merge(c.ConnectionHandshake)
 	x.ChannelHandshake.Merge(c.ChannelHandshake)
+	x.ClientICQ.Merge(c.ClientICQ)
 	return x
 }
 
@@ -96,6 +117,7 @@ func NewIBCMessagesCache() IBCMessagesCache {
 		PacketFlow:          make(ChannelPacketMessagesCache),
 		ConnectionHandshake: make(ConnectionMessagesCache),
 		ChannelHandshake:    make(ChannelMessagesCache),
+		ClientICQ:           make(ClientICQMessagesCache),
 	}
 }
 
@@ -120,12 +142,27 @@ type ConnectionMessagesCache map[string]ConnectionMessageCache
 // ConnectionMessageCache is used for caching connection handshake IBC messages for a given IBC connection.
 type ConnectionMessageCache map[ConnectionKey]provider.ConnectionInfo
 
+// ClientICQType string wrapper for query/response type.
+type ClientICQType string
+
+// ClientICQMessagesCache is used for caching a ClientICQMessageCache for a given type (query/response).
+type ClientICQMessagesCache map[ClientICQType]ClientICQMessageCache
+
+// ClientICQMessageCache is used for caching a client ICQ message for a given query ID.
+type ClientICQMessageCache map[provider.ClientICQQueryID]provider.ClientICQInfo
+
 // ChannelKey is the key used for identifying channels between ChainProcessor and PathProcessor.
 type ChannelKey struct {
 	ChannelID             string
 	PortID                string
 	CounterpartyChannelID string
 	CounterpartyPortID    string
+}
+
+// ChannelState is used for caching channel open state and a lookup for the channel order.
+type ChannelState struct {
+	Order chantypes.Order
+	Open  bool
 }
 
 // Counterparty flips a ChannelKey for the perspective of the counterparty chain
@@ -143,6 +180,18 @@ func (k ChannelKey) Counterparty() ChannelKey {
 func (k ChannelKey) MsgInitKey() ChannelKey {
 	return ChannelKey{
 		ChannelID:             k.ChannelID,
+		PortID:                k.PortID,
+		CounterpartyChannelID: "",
+		CounterpartyPortID:    k.CounterpartyPortID,
+	}
+}
+
+// PreInitKey is used for comparing pre-init keys with other connection
+// handshake messages. Before the channel handshake,
+// do not have ChannelID or CounterpartyChannelID.
+func (k ChannelKey) PreInitKey() ChannelKey {
+	return ChannelKey{
+		ChannelID:             "",
 		PortID:                k.PortID,
 		CounterpartyChannelID: "",
 		CounterpartyPortID:    k.CounterpartyPortID,
@@ -186,6 +235,18 @@ func (connectionKey ConnectionKey) MsgInitKey() ConnectionKey {
 	}
 }
 
+// PreInitKey is used for comparing  pre-init keys with other connection
+// handshake messages. Before starting a connection handshake,
+// do not have ConnectionID or CounterpartyConnectionID.
+func (connectionKey ConnectionKey) PreInitKey() ConnectionKey {
+	return ConnectionKey{
+		ClientID:             connectionKey.ClientID,
+		ConnectionID:         "",
+		CounterpartyClientID: connectionKey.CounterpartyClientID,
+		CounterpartyConnID:   "",
+	}
+}
+
 func (k ConnectionKey) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("connection_id", k.ConnectionID)
 	enc.AddString("client_id", k.ClientID)
@@ -195,7 +256,23 @@ func (k ConnectionKey) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 }
 
 // ChannelStateCache maintains channel open state for multiple channels.
-type ChannelStateCache map[ChannelKey]bool
+type ChannelStateCache map[ChannelKey]ChannelState
+
+// SetOpen sets the open state for a channel, and also the order if it is not NONE.
+func (c ChannelStateCache) SetOpen(k ChannelKey, open bool, order chantypes.Order) {
+	if s, ok := c[k]; ok {
+		s.Open = open
+		if order != chantypes.NONE {
+			s.Order = order
+		}
+		c[k] = s
+		return
+	}
+	c[k] = ChannelState{
+		Open:  open,
+		Order: order,
+	}
+}
 
 // FilterForClient returns a filtered copy of channels on top of an underlying clientID so it can be used by other goroutines.
 func (c ChannelStateCache) FilterForClient(clientID string, channelConnections map[string]string, connectionClients map[string]string) ChannelStateCache {
@@ -265,6 +342,36 @@ func (c PacketMessagesCache) DeleteMessages(toDelete ...map[string][]uint64) {
 			}
 		}
 	}
+}
+
+// IsCached returns true if a sequence for a channel key and event type is already cached.
+func (c ChannelPacketMessagesCache) IsCached(eventType string, k ChannelKey, sequence uint64) bool {
+	if _, ok := c[k]; !ok {
+		return false
+	}
+	if _, ok := c[k][eventType]; !ok {
+		return false
+	}
+	if _, ok := c[k][eventType][sequence]; !ok {
+		return false
+	}
+	return true
+}
+
+// Cache stores packet info safely, generating intermediate maps along the way if necessary.
+func (c ChannelPacketMessagesCache) Cache(
+	eventType string,
+	k ChannelKey,
+	sequence uint64,
+	packetInfo provider.PacketInfo,
+) {
+	if _, ok := c[k]; !ok {
+		c[k] = make(PacketMessagesCache)
+	}
+	if _, ok := c[k][eventType]; !ok {
+		c[k][eventType] = make(PacketSequenceCache)
+	}
+	c[k][eventType][sequence] = packetInfo
 }
 
 // Merge merges another ChannelPacketMessagesCache into this one.
@@ -399,6 +506,41 @@ func (c ChannelMessageCache) Merge(other ChannelMessageCache) {
 	}
 }
 
+// Retain creates cache path if it doesn't exist, then caches message.
+func (c ClientICQMessagesCache) Retain(icqType ClientICQType, ci provider.ClientICQInfo) {
+	queryID := ci.QueryID
+	if _, ok := c[icqType]; !ok {
+		c[icqType] = make(ClientICQMessageCache)
+	}
+	c[icqType][queryID] = ci
+}
+
+// Merge merges another ClientICQMessagesCache into this one.
+func (c ClientICQMessagesCache) Merge(other ClientICQMessagesCache) {
+	for k, v := range other {
+		_, ok := c[k]
+		if !ok {
+			c[k] = v
+		} else {
+			c[k].Merge(v)
+		}
+	}
+}
+
+// Merge merges another ClientICQMessageCache into this one.
+func (c ClientICQMessageCache) Merge(other ClientICQMessageCache) {
+	for k, v := range other {
+		c[k] = v
+	}
+}
+
+// DeleteMessages deletes cached messages for the provided query ID.
+func (c ClientICQMessagesCache) DeleteMessages(queryID provider.ClientICQQueryID) {
+	for _, cm := range c {
+		delete(cm, queryID)
+	}
+}
+
 // IBCHeaderCache holds a mapping of IBCHeaders for their block height.
 type IBCHeaderCache map[uint64]provider.IBCHeader
 
@@ -462,4 +604,11 @@ func ConnectionInfoConnectionKey(info provider.ConnectionInfo) ConnectionKey {
 		ConnectionID:         info.ConnID,
 		CounterpartyConnID:   info.CounterpartyConnID,
 	}
+}
+
+// StuckPacket is used for narrowing block queries on packets that are stuck on a channel for a specific chain.
+type StuckPacket struct {
+	ChainID     string
+	StartHeight uint64
+	EndHeight   uint64
 }

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/cosmos/relayer/v2/relayer"
+	"github.com/cosmos/relayer/v2/relayer/processor"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -18,7 +19,9 @@ const (
 	flagJSON                    = "json"
 	flagYAML                    = "yaml"
 	flagFile                    = "file"
+	flagForceAdd                = "force-add"
 	flagPath                    = "path"
+	flagTestnet                 = "testnet"
 	flagMaxTxSize               = "max-tx-size"
 	flagMaxMsgLength            = "max-msgs"
 	flagIBCDenoms               = "ibc-denoms"
@@ -44,15 +47,28 @@ const (
 	flagReverse                 = "reverse"
 	flagProcessor               = "processor"
 	flagInitialBlockHistory     = "block-history"
+	flagFlushInterval           = "flush-interval"
 	flagMemo                    = "memo"
 	flagFilterRule              = "filter-rule"
 	flagFilterChannels          = "filter-channels"
+	flagSrcChainID              = "src-chain-id"
+	flagDstChainID              = "dst-chain-id"
+	flagSrcClientID             = "src-client-id"
+	flagDstClientID             = "dst-client-id"
+	flagSrcConnID               = "src-connection-id"
+	flagDstConnID               = "dst-connection-id"
+	flagOutput                  = "output"
+	flagStuckPacketChainID      = "stuck-packet-chain-id"
+	flagStuckPacketHeightStart  = "stuck-packet-height-start"
+	flagStuckPacketHeightEnd    = "stuck-packet-height-end"
 )
 
 const (
 	// 7597 is "RLYR" on a telephone keypad.
 	// It also happens to be unassigned in the IANA port list.
 	defaultDebugAddr = "localhost:7597"
+
+	blankValue = "blank"
 )
 
 func ibcDenomFlags(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
@@ -115,6 +131,8 @@ func skipConfirm(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 func chainsAddFlags(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 	fileFlag(v, cmd)
 	urlFlag(v, cmd)
+	forceAddFlag(v, cmd)
+	testnetFlag(v, cmd)
 	return cmd
 }
 
@@ -154,13 +172,54 @@ func fileFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 	return cmd
 }
 
-func pathFilterFlags(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
-	cmd.Flags().String(flagFilterRule, "", `filter rule ("allowlist", "denylist", or "" for no filtering)`)
-	if err := v.BindPFlag(flagFilterRule, cmd.Flags().Lookup(flagFilterRule)); err != nil {
+func testnetFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
+	cmd.Flags().Bool(flagTestnet, false, "fetches testnet data from the chain registry")
+	if err := v.BindPFlag(flagTestnet, cmd.Flags().Lookup(flagTestnet)); err != nil {
 		panic(err)
 	}
-	cmd.Flags().String(flagFilterChannels, "", "channels from source chain perspective to filter")
-	if err := v.BindPFlag(flagFilterRule, cmd.Flags().Lookup(flagFilterRule)); err != nil {
+	return cmd
+}
+
+func forceAddFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
+	cmd.Flags().Bool(flagForceAdd, false, "adds chain data even if there are no working RPC's in the chain registry")
+	if err := v.BindPFlag(flagForceAdd, cmd.Flags().Lookup(flagForceAdd)); err != nil {
+		panic(err)
+	}
+	return cmd
+}
+
+func pathFilterFlags(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
+	flags := cmd.Flags()
+	flags.String(flagFilterRule, blankValue, `filter rule ("allowlist", "denylist", or "" for no filtering)`)
+	if err := v.BindPFlag(flagFilterRule, flags.Lookup(flagFilterRule)); err != nil {
+		panic(err)
+	}
+	flags.String(flagFilterChannels, blankValue, "channels from source chain perspective to filter")
+	if err := v.BindPFlag(flagFilterRule, flags.Lookup(flagFilterRule)); err != nil {
+		panic(err)
+	}
+	flags.String(flagSrcChainID, "", "chain ID for source chain")
+	if err := v.BindPFlag(flagSrcChainID, flags.Lookup(flagSrcChainID)); err != nil {
+		panic(err)
+	}
+	flags.String(flagDstChainID, "", "chain ID for destination chain")
+	if err := v.BindPFlag(flagDstChainID, flags.Lookup(flagDstChainID)); err != nil {
+		panic(err)
+	}
+	flags.String(flagSrcClientID, "", "client ID for source chain")
+	if err := v.BindPFlag(flagSrcClientID, flags.Lookup(flagSrcClientID)); err != nil {
+		panic(err)
+	}
+	flags.String(flagDstClientID, "", "client ID for destination chain")
+	if err := v.BindPFlag(flagDstClientID, flags.Lookup(flagDstClientID)); err != nil {
+		panic(err)
+	}
+	flags.String(flagSrcConnID, "", "connection ID for source chain")
+	if err := v.BindPFlag(flagSrcConnID, flags.Lookup(flagSrcConnID)); err != nil {
+		panic(err)
+	}
+	flags.String(flagDstConnID, "", "connection ID for destination chain")
+	if err := v.BindPFlag(flagDstConnID, flags.Lookup(flagDstConnID)); err != nil {
 		panic(err)
 	}
 	return cmd
@@ -191,18 +250,19 @@ func urlFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 }
 
 func strategyFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
-	cmd.Flags().StringP(flagMaxTxSize, "s", "2", "strategy of path to generate of the messages in a relay transaction")
-	cmd.Flags().StringP(flagMaxMsgLength, "l", "5", "maximum number of messages in a relay transaction")
-	if err := v.BindPFlag(flagMaxTxSize, cmd.Flags().Lookup(flagMaxTxSize)); err != nil {
-		panic(err)
-	}
+	cmd.Flags().Uint64P(
+		flagMaxMsgLength,
+		"l",
+		relayer.DefaultMaxMsgLength,
+		"maximum number of messages per transaction",
+	)
 	if err := v.BindPFlag(flagMaxMsgLength, cmd.Flags().Lookup(flagMaxMsgLength)); err != nil {
 		panic(err)
 	}
 	return cmd
 }
 
-func getAddInputs(cmd *cobra.Command) (file string, url string, err error) {
+func getAddInputs(cmd *cobra.Command) (file string, url string, forceAdd bool, testNet bool, err error) {
 	file, err = cmd.Flags().GetString(flagFile)
 	if err != nil {
 		return
@@ -213,8 +273,22 @@ func getAddInputs(cmd *cobra.Command) (file string, url string, err error) {
 		return
 	}
 
+	forceAdd, err = cmd.Flags().GetBool(flagForceAdd)
+	if err != nil {
+		return
+	}
+
+	testNet, err = cmd.Flags().GetBool(flagTestnet)
+	if err != nil {
+		return
+	}
+
 	if file != "" && url != "" {
-		return "", "", errMultipleAddFlags
+		return "", "", false, false, errMultipleAddFlags
+	}
+
+	if file != "" && testNet || url != "" && testNet {
+		return "", "", false, false, errInvalidTestnetFlag
 	}
 
 	return
@@ -299,7 +373,7 @@ func dstPortFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 }
 
 func debugServerFlags(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
-	cmd.Flags().String(flagDebugAddr, defaultDebugAddr, "address to use for debug server. Set empty to disable debug server.")
+	cmd.Flags().String(flagDebugAddr, "", "address to use for debug and metrics server. By default, will be the api-listen-addr parameter in the global config.")
 	if err := v.BindPFlag(flagDebugAddr, cmd.Flags().Lookup(flagDebugAddr)); err != nil {
 		panic(err)
 	}
@@ -322,6 +396,14 @@ func initBlockFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 	return cmd
 }
 
+func flushIntervalFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
+	cmd.Flags().DurationP(flagFlushInterval, "i", relayer.DefaultFlushInterval, "how frequently should a flush routine be run")
+	if err := v.BindPFlag(flagFlushInterval, cmd.Flags().Lookup(flagFlushInterval)); err != nil {
+		panic(err)
+	}
+	return cmd
+}
+
 func memoFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 	cmd.Flags().String(flagMemo, "", "a memo to include in relayed packets")
 	if err := v.BindPFlag(flagMemo, cmd.Flags().Lookup(flagMemo)); err != nil {
@@ -337,4 +419,67 @@ func OverwriteConfigFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
 		panic(err)
 	}
 	return cmd
+}
+
+func addOutputFlag(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
+	cmd.Flags().StringP(flagOutput, "o", "legacy", "Specify the console output format. Can be 'legacy' or 'json'.")
+	if err := v.BindPFlag(flagOutput, cmd.Flags().Lookup(flagOutput)); err != nil {
+		panic(err)
+	}
+	return cmd
+}
+
+func stuckPacketFlags(v *viper.Viper, cmd *cobra.Command) *cobra.Command {
+	cmd.Flags().String(flagStuckPacketChainID, "", "chain ID with the stuck packet(s)")
+	if err := v.BindPFlag(flagStuckPacketChainID, cmd.Flags().Lookup(flagStuckPacketChainID)); err != nil {
+		panic(err)
+	}
+	cmd.Flags().Uint64(flagStuckPacketHeightStart, 0, "height to start searching for the stuck packet(s)")
+	if err := v.BindPFlag(flagStuckPacketHeightStart, cmd.Flags().Lookup(flagStuckPacketHeightStart)); err != nil {
+		panic(err)
+	}
+	cmd.Flags().Uint64(flagStuckPacketHeightEnd, 0, "height to end searching for the stuck packet(s)")
+	if err := v.BindPFlag(flagStuckPacketHeightEnd, cmd.Flags().Lookup(flagStuckPacketHeightEnd)); err != nil {
+		panic(err)
+	}
+	return cmd
+}
+
+func parseStuckPacketFromFlags(cmd *cobra.Command) (*processor.StuckPacket, error) {
+	stuckPacketChainID, err := cmd.Flags().GetString(flagStuckPacketChainID)
+	if err != nil {
+		return nil, err
+	}
+
+	if stuckPacketChainID == "" {
+		return nil, nil
+	}
+
+	stuckPacketHeightStart, err := cmd.Flags().GetUint64(flagStuckPacketHeightStart)
+	if err != nil {
+		return nil, err
+	}
+
+	if stuckPacketHeightStart == 0 {
+		return nil, fmt.Errorf("stuck packet chain ID %s is set but start height is not", stuckPacketChainID)
+	}
+
+	stuckPacketHeightEnd, err := cmd.Flags().GetUint64(flagStuckPacketHeightEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	if stuckPacketHeightEnd == 0 {
+		return nil, fmt.Errorf("stuck packet chain ID %s is set but end height is not", stuckPacketChainID)
+	}
+
+	if stuckPacketHeightEnd < stuckPacketHeightStart {
+		return nil, fmt.Errorf("stuck packet end height %d is less than start height %d", stuckPacketHeightEnd, stuckPacketHeightStart)
+	}
+
+	return &processor.StuckPacket{
+		ChainID:     stuckPacketChainID,
+		StartHeight: stuckPacketHeightStart,
+		EndHeight:   stuckPacketHeightEnd,
+	}, nil
 }

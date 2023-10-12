@@ -49,11 +49,13 @@ func pathsDeleteCmd(a *appState) *cobra.Command {
 $ %s paths delete demo-path
 $ %s pth d path-name`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := a.Config.Paths.Get(args[0]); err != nil {
-				return err
-			}
-			delete(a.Config.Paths, args[0])
-			return a.OverwriteConfig(a.Config)
+			return a.performConfigLockingOperation(cmd.Context(), func() error {
+				if _, err := a.config.Paths.Get(args[0]); err != nil {
+					return err
+				}
+				delete(a.config.Paths, args[0])
+				return nil
+			})
 		},
 	}
 	return cmd
@@ -76,14 +78,14 @@ $ %s pth l`, appName, appName, appName)),
 			case yml && jsn:
 				return fmt.Errorf("can't pass both --json and --yaml, must pick one")
 			case yml:
-				out, err := yaml.Marshal(a.Config.Paths)
+				out, err := yaml.Marshal(a.config.Paths)
 				if err != nil {
 					return err
 				}
 				fmt.Fprintln(cmd.OutOrStdout(), string(out))
 				return nil
 			case jsn:
-				out, err := json.Marshal(a.Config.Paths)
+				out, err := json.Marshal(a.config.Paths)
 				if err != nil {
 					return err
 				}
@@ -91,8 +93,8 @@ $ %s pth l`, appName, appName, appName)),
 				return nil
 			default:
 				i := 0
-				for k, pth := range a.Config.Paths {
-					chains, err := a.Config.Chains.Gets(pth.Src.ChainID, pth.Dst.ChainID)
+				for k, pth := range a.config.Paths {
+					chains, err := a.config.Chains.Gets(pth.Src.ChainID, pth.Dst.ChainID)
 					if err != nil {
 						return err
 					}
@@ -107,7 +109,7 @@ $ %s pth l`, appName, appName, appName)),
 			}
 		},
 	}
-	return yamlFlag(a.Viper, jsonFlag(a.Viper, cmd))
+	return yamlFlag(a.viper, jsonFlag(a.viper, cmd))
 }
 
 func printPath(stdout io.Writer, i int, k string, pth *relayer.Path, chains, clients, connection string) {
@@ -133,11 +135,11 @@ $ %s paths show demo-path --yaml
 $ %s paths show demo-path --json
 $ %s pth s path-name`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := a.Config.Paths.Get(args[0])
+			p, err := a.config.Paths.Get(args[0])
 			if err != nil {
 				return err
 			}
-			chains, err := a.Config.Chains.Gets(p.Src.ChainID, p.Dst.ChainID)
+			chains, err := a.config.Chains.Gets(p.Src.ChainID, p.Dst.ChainID)
 			if err != nil {
 				return err
 			}
@@ -168,7 +170,7 @@ $ %s pth s path-name`, appName, appName, appName)),
 			return nil
 		},
 	}
-	return yamlFlag(a.Viper, jsonFlag(a.Viper, cmd))
+	return yamlFlag(a.viper, jsonFlag(a.viper, cmd))
 }
 
 func pathsAddCmd(a *appState) *cobra.Command {
@@ -183,30 +185,32 @@ $ %s paths add ibc-0 ibc-1 demo-path --file paths/demo.json
 $ %s pth a ibc-0 ibc-1 demo-path`, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			src, dst := args[0], args[1]
-			_, err := a.Config.Chains.Gets(src, dst)
-			if err != nil {
-				return fmt.Errorf("chains need to be configured before paths to them can be added: %w", err)
-			}
 
-			file, err := cmd.Flags().GetString(flagFile)
-			if err != nil {
-				return err
-			}
+			return a.performConfigLockingOperation(cmd.Context(), func() error {
+				_, err := a.config.Chains.Gets(src, dst)
+				if err != nil {
+					return fmt.Errorf("chains need to be configured before paths to them can be added: %w", err)
+				}
 
-			if file != "" {
-				if err := a.AddPathFromFile(cmd.Context(), cmd.ErrOrStderr(), file, args[2]); err != nil {
+				file, err := cmd.Flags().GetString(flagFile)
+				if err != nil {
 					return err
 				}
-			} else {
-				if err := a.AddPathFromUserInput(cmd.Context(), cmd.InOrStdin(), cmd.ErrOrStderr(), src, dst, args[2]); err != nil {
-					return err
-				}
-			}
 
-			return a.OverwriteConfig(a.Config)
+				if file != "" {
+					if err := a.addPathFromFile(cmd.Context(), cmd.ErrOrStderr(), file, args[2]); err != nil {
+						return err
+					}
+				} else {
+					if err := a.addPathFromUserInput(cmd.Context(), cmd.InOrStdin(), cmd.ErrOrStderr(), src, dst, args[2]); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
 		},
 	}
-	return fileFlag(a.Viper, cmd)
+	return fileFlag(a.viper, cmd)
 }
 
 func pathsAddDirCmd(a *appState) *cobra.Command {
@@ -220,10 +224,7 @@ func pathsAddDirCmd(a *appState) *cobra.Command {
 		Example: strings.TrimSpace(fmt.Sprintf(`
 $ %s config add-paths examples/demo/configs/paths`, appName)),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
-			if err := addPathsFromDirectory(cmd.Context(), cmd.ErrOrStderr(), a, args[0]); err != nil {
-				return err
-			}
-			return a.OverwriteConfig(a.Config)
+			return addPathsFromDirectory(cmd.Context(), cmd.ErrOrStderr(), a, args[0])
 		},
 	}
 
@@ -241,70 +242,120 @@ $ %s paths new ibc-0 ibc-1 demo-path
 $ %s pth n ibc-0 ibc-1 demo-path`, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			src, dst := args[0], args[1]
-			_, err := a.Config.Chains.Gets(src, dst)
-			if err != nil {
-				return fmt.Errorf("chains need to be configured before paths to them can be added: %w", err)
-			}
 
-			p := &relayer.Path{
-				Src: &relayer.PathEnd{ChainID: src},
-				Dst: &relayer.PathEnd{ChainID: dst},
-			}
+			return a.performConfigLockingOperation(cmd.Context(), func() error {
+				_, err := a.config.Chains.Gets(src, dst)
+				if err != nil {
+					return fmt.Errorf("chains need to be configured before paths to them can be added: %w", err)
+				}
 
-			name := args[2]
-			if err = a.Config.Paths.Add(name, p); err != nil {
-				return err
-			}
+				p := &relayer.Path{
+					Src: &relayer.PathEnd{ChainID: src},
+					Dst: &relayer.PathEnd{ChainID: dst},
+				}
 
-			return a.OverwriteConfig(a.Config)
+				name := args[2]
+				if err = a.config.AddPath(name, p); err != nil {
+					return err
+				}
+				return nil
+			})
 		},
 	}
-	return channelParameterFlags(a.Viper, cmd)
+	return channelParameterFlags(a.viper, cmd)
 }
 
 func pathsUpdateCmd(a *appState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "update path_name",
 		Aliases: []string{"n"},
-		Short:   `Update a path such as the filter rule ("allowlist", "denylist", or "" for no filtering) and channels`,
+		Short:   `Update a path such as the filter rule ("allowlist", "denylist", or "" for no filtering), filter channels, and src/dst chain, client, or connection IDs`,
 		Args:    withUsage(cobra.ExactArgs(1)),
 		Example: strings.TrimSpace(fmt.Sprintf(`
 $ %s paths update demo-path --filter-rule allowlist --filter-channels channel-0,channel-1
-$ %s paths update demo-path --filter-rule denylist --filter-channels channel-0,channel-1`,
-			appName, appName)),
+$ %s paths update demo-path --filter-rule denylist --filter-channels channel-0,channel-1
+$ %s paths update demo-path --src-chain-id chain-1 --dst-chain-id chain-2
+$ %s paths update demo-path --src-client-id 07-tendermint-02 --dst-client-id 07-tendermint-04
+$ %s paths update demo-path --src-connection-id connection-02 --dst-connection-id connection-04`,
+			appName, appName, appName, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
-			filterRule, err := cmd.Flags().GetString(flagFilterRule)
-			if err != nil {
-				return err
-			}
-			if filterRule != "" && filterRule != processor.RuleAllowList && filterRule != processor.RuleDenyList {
-				return fmt.Errorf(`invalid filter rule : "%s". valid rules: ("", "%s", "%s")`, filterRule, processor.RuleAllowList, processor.RuleDenyList)
-			}
+			flags := cmd.Flags()
 
-			filterChannels, err := cmd.Flags().GetString(flagFilterChannels)
-			if err != nil {
-				return err
-			}
+			return a.performConfigLockingOperation(cmd.Context(), func() error {
+				p := a.config.Paths.MustGet(name)
 
-			var channelList []string
+				actionTaken := false
 
-			if filterChannels != "" {
-				channelList = strings.Split(filterChannels, ",")
-			}
+				filterRule, _ := flags.GetString(flagFilterRule)
+				if filterRule != blankValue {
+					if filterRule != "" && filterRule != processor.RuleAllowList && filterRule != processor.RuleDenyList {
+						return fmt.Errorf(
+							`invalid filter rule : "%s". valid rules: ("", "%s", "%s")`,
+							filterRule, processor.RuleAllowList, processor.RuleDenyList)
+					}
+					p.Filter.Rule = filterRule
+					actionTaken = true
+				}
 
-			p := a.Config.Paths.MustGet(name)
+				filterChannels, _ := flags.GetString(flagFilterChannels)
+				if filterChannels != blankValue {
+					var channelList []string
 
-			p.Filter = relayer.ChannelFilter{
-				Rule:        filterRule,
-				ChannelList: channelList,
-			}
+					if filterChannels != "" {
+						channelList = strings.Split(filterChannels, ",")
+					}
 
-			return a.OverwriteConfig(a.Config)
+					p.Filter.ChannelList = channelList
+					actionTaken = true
+				}
+
+				srcChainID, _ := flags.GetString(flagSrcChainID)
+				if srcChainID != "" {
+					p.Src.ChainID = srcChainID
+					actionTaken = true
+				}
+
+				dstChainID, _ := flags.GetString(flagDstChainID)
+				if dstChainID != "" {
+					p.Dst.ChainID = dstChainID
+					actionTaken = true
+				}
+
+				srcClientID, _ := flags.GetString(flagSrcClientID)
+				if srcClientID != "" {
+					p.Src.ClientID = srcClientID
+					actionTaken = true
+				}
+
+				dstClientID, _ := flags.GetString(flagDstClientID)
+				if dstClientID != "" {
+					p.Dst.ClientID = dstClientID
+					actionTaken = true
+				}
+
+				srcConnID, _ := flags.GetString(flagSrcConnID)
+				if srcConnID != "" {
+					p.Src.ConnectionID = srcConnID
+					actionTaken = true
+				}
+
+				dstConnID, _ := flags.GetString(flagDstConnID)
+				if dstConnID != "" {
+					p.Dst.ConnectionID = dstConnID
+					actionTaken = true
+				}
+
+				if !actionTaken {
+					return fmt.Errorf("at least one flag must be provided")
+				}
+
+				return nil
+			})
 		},
 	}
-	cmd = pathFilterFlags(a.Viper, cmd)
+	cmd = pathFilterFlags(a.viper, cmd)
 	return cmd
 }
 
@@ -313,99 +364,121 @@ func pathsFetchCmd(a *appState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "fetch",
 		Aliases: []string{"fch"},
-		Short:   "Fetches the json files necessary to setup the paths for the configured chains",
-		Args:    withUsage(cobra.NoArgs),
+		Short:   "Fetches the json files necessary to setup the paths for the configured chains. Passing a chain name will only fetch paths for that chain",
+		Args:    withUsage(cobra.RangeArgs(0, 1)),
 		Example: strings.TrimSpace(fmt.Sprintf(`
 $ %s paths fetch --home %s
-$ %s pth fch`, appName, defaultHome, appName)),
+$ %s paths fetch --testnet
+$ %s pth fch`, appName, defaultHome, appName, appName)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			overwrite, _ := cmd.Flags().GetBool(flagOverwriteConfig)
+			testnet, _ := cmd.Flags().GetBool(flagTestnet)
 
-			chains := []string{}
-			for chainName := range a.Config.Chains {
-				chains = append(chains, chainName)
+			// allow the relayer to only pull paths for a specific chain
+			chainReq := ""
+			if len(args) > 0 {
+				chainReq = args[0]
+				_, exist := a.config.Chains[chainReq]
+				if !exist {
+					return fmt.Errorf("chain %s not found in config", chainReq)
+				}
 			}
 
-			// find all combinations of paths for configured chains
-			chainCombinations := make(map[string]bool)
-			for _, chainA := range chains {
-				for _, chainB := range chains {
-					if chainA == chainB {
+			return a.performConfigLockingOperation(cmd.Context(), func() error {
+				chains := []string{}
+				for chainName := range a.config.Chains {
+					chains = append(chains, chainName)
+				}
+
+				// find all combinations of paths for configured chains
+				chainCombinations := make(map[string]bool)
+				for _, chainA := range chains {
+					for _, chainB := range chains {
+						if chainA == chainB {
+							continue
+						}
+
+						pair := chainA + "-" + chainB
+						if chainB < chainA {
+							pair = chainB + "-" + chainA
+						}
+
+						if chainReq != "" && !strings.Contains(pair, chainReq) {
+							continue
+						}
+
+						chainCombinations[pair] = true
+					}
+				}
+
+				client := github.NewClient(nil)
+				for pthName := range chainCombinations {
+					_, exist := a.config.Paths[pthName]
+					if exist && !overwrite {
+						fmt.Fprintf(cmd.ErrOrStderr(), "skipping:  %s already exists in config, use -o to overwrite (clears filters)\n", pthName)
 						continue
 					}
 
-					pair := chainA + "-" + chainB
-					if chainB < chainA {
-						pair = chainB + "-" + chainA
+					// TODO: Don't use github api. Potentially use http.get like GetChain() does to avoid rate limits
+					fileName := pthName + ".json"
+					var regPath string
+					if testnet {
+						regPath = path.Join("testnets", "_IBC", fileName)
+					} else {
+						regPath = path.Join("_IBC", fileName)
+
 					}
-					chainCombinations[pair] = true
-				}
-			}
-
-			client := github.NewClient(nil)
-			for pthName := range chainCombinations {
-				_, exist := a.Config.Paths[pthName]
-				if exist && !overwrite {
-					fmt.Fprintf(cmd.ErrOrStderr(), "skipping:  %s already exists in config, use -o to overwrite (clears filters)\n", pthName)
-					continue
-				}
-
-				// TODO: Don't use github api. Potentially use: https://github.com/eco-stake/cosmos-directory once they integrate IBC data into restAPI. This will avoid rate limits.
-				fileName := pthName + ".json"
-				regPath := path.Join("_IBC", fileName)
-				client, _, err := client.Repositories.DownloadContents(cmd.Context(), "cosmos", "chain-registry", regPath, nil)
-				if err != nil {
-					if errors.As(err, new(*github.RateLimitError)) {
-						fmt.Println("some paths failed: ", err)
-						break
+					client, _, err := client.Repositories.DownloadContents(cmd.Context(), "cosmos", "chain-registry", regPath, nil)
+					if err != nil {
+						if errors.As(err, new(*github.RateLimitError)) {
+							fmt.Println("some paths failed: ", err)
+							break
+						}
+						fmt.Fprintf(cmd.ErrOrStderr(), "failure retrieving: %s: consider adding to cosmos/chain-registry: ERR: %v\n", pthName, err)
+						continue
 					}
-					fmt.Fprintf(cmd.ErrOrStderr(), "failure retrieving: %s: consider adding to cosmos/chain-registry: ERR: %v\n", pthName, err)
-					continue
+					defer client.Close()
+
+					b, err := io.ReadAll(client)
+					if err != nil {
+						return fmt.Errorf("error reading response body: %w", err)
+					}
+
+					ibc := &relayer.IBCdata{}
+					if err = json.Unmarshal(b, &ibc); err != nil {
+						return fmt.Errorf("failed to unmarshal: %w ", err)
+					}
+
+					srcChainName := ibc.Chain1.ChainName
+					dstChainName := ibc.Chain2.ChainName
+
+					srcPathEnd := &relayer.PathEnd{
+						ChainID:      a.config.Chains[srcChainName].ChainID(),
+						ClientID:     ibc.Chain1.ClientID,
+						ConnectionID: ibc.Chain1.ConnectionID,
+					}
+					dstPathEnd := &relayer.PathEnd{
+						ChainID:      a.config.Chains[dstChainName].ChainID(),
+						ClientID:     ibc.Chain2.ClientID,
+						ConnectionID: ibc.Chain2.ConnectionID,
+					}
+					newPath := &relayer.Path{
+						Src: srcPathEnd,
+						Dst: dstPathEnd,
+					}
+					client.Close()
+
+					if err = a.config.AddPath(pthName, newPath); err != nil {
+						return fmt.Errorf("failed to add path %s: %w", pthName, err)
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(), "added:  %s\n", pthName)
+
 				}
-				defer client.Close()
-
-				b, err := io.ReadAll(client)
-				if err != nil {
-					return fmt.Errorf("error reading response body: %w", err)
-				}
-
-				ibc := &relayer.IBCdata{}
-				if err = json.Unmarshal(b, &ibc); err != nil {
-					return fmt.Errorf("failed to unmarshal: %w ", err)
-				}
-
-				srcChainName := ibc.Chain1.ChainName
-				dstChainName := ibc.Chain2.ChainName
-
-				srcPathEnd := &relayer.PathEnd{
-					ChainID:      a.Config.Chains[srcChainName].ChainID(),
-					ClientID:     ibc.Chain1.ClientID,
-					ConnectionID: ibc.Chain1.ConnectionID,
-				}
-				dstPathEnd := &relayer.PathEnd{
-					ChainID:      a.Config.Chains[dstChainName].ChainID(),
-					ClientID:     ibc.Chain2.ClientID,
-					ConnectionID: ibc.Chain2.ConnectionID,
-				}
-				newPath := &relayer.Path{
-					Src: srcPathEnd,
-					Dst: dstPathEnd,
-				}
-				client.Close()
-
-				if err = a.Config.AddPath(pthName, newPath); err != nil {
-					return fmt.Errorf("failed to add path %s: %w", pthName, err)
-				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "added:  %s\n", pthName)
-
-			}
-
-			if err := a.OverwriteConfig(a.Config); err != nil {
-				return err
-			}
-			return nil
-
+				return nil
+			})
 		},
 	}
-	return OverwriteConfigFlag(a.Viper, cmd)
+	OverwriteConfigFlag(a.viper, cmd)
+	testnetFlag(a.viper, cmd)
+	return cmd
 }

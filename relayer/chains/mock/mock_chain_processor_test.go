@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	clienttypes "github.com/cosmos/ibc-go/v5/modules/core/02-client/types"
-	chantypes "github.com/cosmos/ibc-go/v5/modules/core/04-channel/types"
+	clienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
+	"github.com/cosmos/relayer/v2/relayer"
 	"github.com/cosmos/relayer/v2/relayer/chains/mock"
 	"github.com/cosmos/relayer/v2/relayer/processor"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -59,13 +60,15 @@ func TestMockChainAndPathProcessors(t *testing.T) {
 	metrics := processor.NewPrometheusMetrics()
 
 	clientUpdateThresholdTime := 6 * time.Hour
+	flushInterval := 6 * time.Hour
 
-	pathProcessor := processor.NewPathProcessor(log, pathEnd1, pathEnd2, metrics, "", clientUpdateThresholdTime)
+	pathProcessor := processor.NewPathProcessor(log, pathEnd1, pathEnd2, metrics, "",
+		clientUpdateThresholdTime, flushInterval, relayer.DefaultMaxMsgLength)
 
 	eventProcessor := processor.NewEventProcessor().
 		WithChainProcessors(
-			mock.NewMockChainProcessor(log, mockChainID1, getMockMessages1),
-			mock.NewMockChainProcessor(log, mockChainID2, getMockMessages2),
+			mock.NewMockChainProcessor(ctx, log, mockChainID1, getMockMessages1),
+			mock.NewMockChainProcessor(ctx, log, mockChainID2, getMockMessages2),
 		).
 		WithInitialBlockHistory(100).
 		WithPathProcessors(pathProcessor).

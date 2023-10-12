@@ -2,9 +2,10 @@ package cosmos
 
 import (
 	"context"
+	"encoding/hex"
 
-	conntypes "github.com/cosmos/ibc-go/v5/modules/core/03-connection/types"
-	chantypes "github.com/cosmos/ibc-go/v5/modules/core/04-channel/types"
+	conntypes "github.com/cosmos/ibc-go/v7/modules/core/03-connection/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"github.com/cosmos/relayer/v2/relayer/processor"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	"go.uber.org/zap"
@@ -21,6 +22,8 @@ func (ccp *CosmosChainProcessor) handleMessage(ctx context.Context, m ibcMessage
 		ccp.handleConnectionMessage(m.eventType, provider.ConnectionInfo(*t), c)
 	case *clientInfo:
 		ccp.handleClientMessage(ctx, m.eventType, *t)
+	case *clientICQInfo:
+		ccp.handleClientICQMessage(m.eventType, provider.ClientICQInfo(*t), c)
 	}
 }
 
@@ -37,7 +40,7 @@ func (ccp *CosmosChainProcessor) handlePacketMessage(eventType string, pi provid
 	}
 
 	if eventType == chantypes.EventTypeTimeoutPacket && pi.ChannelOrder == chantypes.ORDERED.String() {
-		ccp.channelStateCache[k] = false
+		ccp.channelStateCache.SetOpen(k, false, chantypes.ORDERED)
 	}
 
 	if !c.PacketFlow.ShouldRetainSequence(ccp.pathProcessors, k, ccp.chainProvider.ChainId(), eventType, pi.Sequence) {
@@ -75,18 +78,19 @@ func (ccp *CosmosChainProcessor) handleChannelMessage(eventType string, ci provi
 			}
 		}
 		if !found {
-			ccp.channelStateCache[channelKey] = false
+			ccp.channelStateCache.SetOpen(channelKey, false, ci.Order)
 		}
 	} else {
 		switch eventType {
 		case chantypes.EventTypeChannelOpenTry:
-			ccp.channelStateCache[channelKey] = false
+			ccp.channelStateCache.SetOpen(channelKey, false, ci.Order)
 		case chantypes.EventTypeChannelOpenAck, chantypes.EventTypeChannelOpenConfirm:
-			ccp.channelStateCache[channelKey] = true
+			ccp.channelStateCache.SetOpen(channelKey, true, ci.Order)
+			ccp.logChannelOpenMessage(eventType, ci)
 		case chantypes.EventTypeChannelCloseConfirm:
 			for k := range ccp.channelStateCache {
 				if k.PortID == ci.PortID && k.ChannelID == ci.ChannelID {
-					ccp.channelStateCache[k] = false
+					ccp.channelStateCache.SetOpen(channelKey, false, ci.Order)
 					break
 				}
 			}
@@ -133,6 +137,15 @@ func (ccp *CosmosChainProcessor) handleClientMessage(ctx context.Context, eventT
 	ccp.logObservedIBCMessage(eventType, zap.String("client_id", ci.clientID))
 }
 
+func (ccp *CosmosChainProcessor) handleClientICQMessage(
+	eventType string,
+	ci provider.ClientICQInfo,
+	c processor.IBCMessagesCache,
+) {
+	c.ClientICQ.Retain(processor.ClientICQType(eventType), ci)
+	ccp.logClientICQMessage(eventType, ci)
+}
+
 func (ccp *CosmosChainProcessor) logObservedIBCMessage(m string, fields ...zap.Field) {
 	ccp.log.With(zap.String("event_type", m)).Debug("Observed IBC message", fields...)
 }
@@ -170,11 +183,32 @@ func (ccp *CosmosChainProcessor) logChannelMessage(message string, ci provider.C
 	)
 }
 
+func (ccp *CosmosChainProcessor) logChannelOpenMessage(message string, ci provider.ChannelInfo) {
+	fields := []zap.Field{
+
+		zap.String("channel_id", ci.ChannelID),
+		zap.String("connection_id", ci.ConnID),
+		zap.String("port_id", ci.PortID),
+	}
+	ccp.log.Info("Successfully created new channel", fields...)
+}
+
 func (ccp *CosmosChainProcessor) logConnectionMessage(message string, ci provider.ConnectionInfo) {
 	ccp.logObservedIBCMessage(message,
 		zap.String("client_id", ci.ClientID),
 		zap.String("connection_id", ci.ConnID),
 		zap.String("counterparty_client_id", ci.CounterpartyClientID),
 		zap.String("counterparty_connection_id", ci.CounterpartyConnID),
+	)
+}
+
+func (ccp *CosmosChainProcessor) logClientICQMessage(icqType string, ci provider.ClientICQInfo) {
+	ccp.logObservedIBCMessage(icqType,
+		zap.String("type", ci.Type),
+		zap.String("query_id", string(ci.QueryID)),
+		zap.String("request", hex.EncodeToString(ci.Request)),
+		zap.String("chain_id", ci.Chain),
+		zap.String("connection_id", ci.Connection),
+		zap.Uint64("height", ci.Height),
 	)
 }

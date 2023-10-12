@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	conntypes "github.com/cosmos/ibc-go/v5/modules/core/03-connection/types"
+	conntypes "github.com/cosmos/ibc-go/v7/modules/core/03-connection/types"
 	"github.com/cosmos/relayer/v2/relayer/processor"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	"go.uber.org/zap"
@@ -39,6 +39,8 @@ func (c *Chain) CreateOpenConnections(
 		nil,
 		memo,
 		DefaultClientUpdateThreshold,
+		DefaultFlushInterval,
+		DefaultMaxMsgLength,
 	)
 
 	var connectionSrc, connectionDst string

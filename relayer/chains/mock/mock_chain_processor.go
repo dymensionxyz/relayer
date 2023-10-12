@@ -4,11 +4,12 @@ import (
 	"context"
 	"time"
 
+	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/cosmos/relayer/v2/relayer/chains/cosmos"
 	"github.com/cosmos/relayer/v2/relayer/processor"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 
-	chantypes "github.com/cosmos/ibc-go/v5/modules/core/04-channel/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"go.uber.org/zap"
 )
 
@@ -39,7 +40,7 @@ type TransactionMessage struct {
 	PacketInfo *chantypes.Packet
 }
 
-func NewMockChainProcessor(log *zap.Logger, chainID string, getMockMessages func() []TransactionMessage) *MockChainProcessor {
+func NewMockChainProcessor(ctx context.Context, log *zap.Logger, chainID string, getMockMessages func() []TransactionMessage) *MockChainProcessor {
 	chainProviderCfg := cosmos.CosmosProviderConfig{
 		Key:            "mock-key",
 		ChainID:        chainID,
@@ -48,7 +49,8 @@ func NewMockChainProcessor(log *zap.Logger, chainID string, getMockMessages func
 		Timeout:        "10s",
 	}
 	chainProvider, _ := chainProviderCfg.NewProvider(zap.NewNop(), "/tmp", true, "mock-chain-name-"+chainID)
-	_, _ = chainProvider.AddKey(chainProvider.Key(), 118)
+	_ = chainProvider.Init(ctx)
+	_, _ = chainProvider.AddKey(chainProvider.Key(), 118, string(hd.Secp256k1Type))
 	return &MockChainProcessor{
 		log:             log,
 		chainID:         chainID,
@@ -71,7 +73,7 @@ type queryCyclePersistence struct {
 	latestQueriedBlock int64
 }
 
-func (mcp *MockChainProcessor) Run(ctx context.Context, initialBlockHistory uint64) error {
+func (mcp *MockChainProcessor) Run(ctx context.Context, initialBlockHistory uint64, _ *processor.StuckPacket) error {
 	// this will be used for persistence across query cycle loop executions
 	persistence := queryCyclePersistence{
 		// would be query of latest height, mocking 20
@@ -90,6 +92,8 @@ func (mcp *MockChainProcessor) Run(ctx context.Context, initialBlockHistory uint
 	mcp.log.Info("entering main query loop", zap.String("chain_id", mcp.chainID))
 
 	ticker := time.NewTicker(minQueryLoopDuration)
+	defer ticker.Stop()
+
 	// QueryLoop:
 	for {
 		mcp.queryCycle(ctx, &persistence)
@@ -153,6 +157,7 @@ func (mcp *MockChainProcessor) queryCycle(ctx context.Context, persistence *quer
 		for _, m := range messages {
 			if handler, ok := messageHandlers[m.EventType]; ok {
 				handler(msgHandlerParams{
+					height:           i,
 					mcp:              mcp,
 					packetInfo:       m.PacketInfo,
 					ibcMessagesCache: ibcMessagesCache,
@@ -165,13 +170,17 @@ func (mcp *MockChainProcessor) queryCycle(ctx context.Context, persistence *quer
 
 		// mocking all channels open
 		for channelKey := range ibcMessagesCache.PacketFlow {
-			channelStateCache[channelKey] = true
+			channelStateCache.SetOpen(channelKey, true, chantypes.NONE)
 		}
 
 		// now pass foundMessages to the path processors
 		for _, pp := range mcp.pathProcessors {
 			mcp.log.Info("sending messages to path processor", zap.String("chain_id", mcp.chainID))
 			pp.HandleNewData(mcp.chainID, processor.ChainProcessorCacheData{
+				LatestBlock: provider.LatestBlock{
+					Height: uint64(i),
+					Time:   time.Now(),
+				},
 				IBCMessagesCache:  ibcMessagesCache,
 				InSync:            mcp.inSync,
 				ChannelStateCache: channelStateCache,

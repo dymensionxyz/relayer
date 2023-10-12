@@ -6,17 +6,18 @@ import (
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	clienttypes "github.com/cosmos/ibc-go/v5/modules/core/02-client/types"
-	chantypes "github.com/cosmos/ibc-go/v5/modules/core/04-channel/types"
-	ibcexported "github.com/cosmos/ibc-go/v5/modules/core/exported"
+	clienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
+	ibcexported "github.com/cosmos/ibc-go/v7/modules/core/exported"
 	"github.com/cosmos/relayer/v2/relayer/provider"
 	"go.uber.org/zap"
 )
 
 const defaultTimeoutOffset = 1000
 
-//nolint:lll
 // SendTransferMsg initiates an ics20 transfer from src to dst with the specified args
+//
+//nolint:lll
 func (c *Chain) SendTransferMsg(ctx context.Context, log *zap.Logger, dst *Chain, amount sdk.Coin, dstAddr string, toHeightOffset uint64, toTimeOffset time.Duration, srcChannel *chantypes.IdentifiedChannel) error {
 	var (
 		timeoutHeight    uint64
@@ -112,7 +113,15 @@ func (c *Chain) SendTransferMsg(ctx context.Context, log *zap.Logger, dst *Chain
 			)
 		}
 		return err
+	} else {
+		if result.SuccessfullySent() {
+			c.log.Info(
+				"Successfully sent a transfer",
+				zap.String("src_chain_id", c.ChainID()),
+				zap.String("dst_chain_id", dst.ChainID()),
+				zap.Object("send_result", result),
+			)
+		}
 	}
-
 	return nil
 }
